@@ -1,0 +1,104 @@
+/* src/index.css */
+
+/* 1. 激活 Tailwind CSS v4 引擎 */
+@import "tailwindcss";
+
+/*
+  2. 颜色仓库 (@theme)
+  这里存放所有的绝对颜色值。
+  首先将“白天用的白”和“晚上用的黑”都定义在这里。
+*/
+@theme {
+    /* --- 基础调色板 (Light Sources) --- */
+    --color-bg-primary: #ffffff;
+    --color-bg-secondary: #f3f4f6; /* 浅白 */
+    --color-text-primary: #1f2937; /* 深灰 */
+    --color-text-secondary: #6b7280; /* 中灰 */
+    /* --- 暗黑调色板 (Dark Sources) --- */
+    --color-bg-primary-dark: #141414; /* Element Plus 默认黑 */
+    --color-bg-secondary-dark: #1d1e1f; /* 稍浅一点的黑，用于侧边栏或卡片 */
+    --color-text-primary-dark: #E5EAF3; /* Element Plus 默认白 */
+    --color-text-secondary-dark: #A3A6AD; /* 稍暗的字 */
+    /* --- 工具调色板 (Utility Colors) --- */
+    --color-gray-750: #2d3748;
+    --color-gray-850: #1a202c;
+    --color-gray-950: #0d1117;
+}
+
+/*
+  3. 暗黑模式触发器
+*/
+@variant dark (&:where(.dark, .dark *));
+
+/*
+  4. 逻辑映射层 (:root)
+  这里决定了 --bg-primary 到底指向哪个仓库里的颜色。
+*/
+:root {
+    /* 默认 (白天) 映射 */
+    --bg-primary: var(--color-bg-primary);
+    --bg-secondary: var(--color-bg-secondary);
+    --text-primary: var(--color-text-primary);
+    --text-secondary: var(--color-text-secondary);
+}
+
+:root.dark {
+    /* 暗黑 (夜晚) 映射 */
+    --bg-primary: var(--color-bg-primary-dark);
+    --bg-secondary: var(--color-bg-secondary-dark);
+    --text-primary: var(--color-text-primary-dark);
+    --text-secondary: var(--color-text-secondary-dark);
+
+    /* 作用：告诉浏览器原生控件（如滚动条、复选框）现在是暗色模式，浏览器会自动调整它们的默认样式 */
+    color-scheme: dark;
+}
+
+/*
+   6. 全局 Body 样式
+   @apply: 将 Tailwind 的工具类混合进来。
+   text-(--text-primary): v4 语法，直接使用 CSS 变量作为颜色。
+   transition-colors: 让颜色切换有 300ms 的渐变动画，不生硬。
+*/
+body {
+    @apply bg-(--bg-primary) text-(--text-primary) transition-colors duration-300;
+
+    /*
+       作用：虽然上面 @apply 设置了背景，但这里显式再写一遍 background-color 是为了
+       防止 macOS Safari 等浏览器在“橡皮筋滚动”（页面拉到底露出的背景）时显示成白色。
+    */
+    background-color: var(--bg-primary);
+}
+
+/*
+   7. 自定义滚动条 (Webkit 内核浏览器)
+   这是纯 CSS 写法，用来美化 Chrome/Edge 的滚动条。
+*/
+.custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+    @apply bg-gray-300 rounded-[3px] transition-colors;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-400;
+}
+
+/*
+   8. 暗黑模式下的滚动条微调
+   作用：在暗黑模式下，让滚动条滑块变深一点，避免刺眼。
+   .dark .custom-... : 利用层级选择器覆盖样式。
+*/
+.dark .custom-scrollbar::-webkit-scrollbar-thumb {
+    @apply bg-gray-600;
+}
+
+.dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-500;
+}
