@@ -15,6 +15,7 @@ export const TRANSLATIONS = {
     localSaves: {en: 'Local Saves (Clusters)', zh: '本地存档 (Clusters)'},
     serverList: {en: 'Dedicated Servers', zh: '专用服务器列表'},
     convert: {en: 'Convert to Server', zh: '转为服务器'},
+    convertToLocal: {en: 'Convert to Local', zh: '转为本地存档'},
     serverDetails: {en: 'Server Details', zh: '服务器详情'},
     start: {en: 'Start Server', zh: '启动服务器'},
     stop: {en: 'Stop Server', zh: '关闭服务器'},
@@ -31,6 +32,7 @@ export const TRANSLATIONS = {
     running: {en: 'Running', zh: '运行中'},
     stopped: {en: 'Stopped', zh: '已停止'},
     starting: {en: 'Starting', zh: '启动中'},
+    stopping: {en: 'Stopping', zh: '关闭中'},
     noSelection: {en: 'Select a server to view details', zh: '请选择一个服务器以查看详情'},
     placeholderToken: {en: 'Enter your Klei Server Token', zh: '输入您的 Klei 服务器令牌'},
     darkMode: {en: 'Dark Mode', zh: '深色模式'},
@@ -93,6 +95,7 @@ export const TRANSLATIONS = {
     // 消息提示
     tokenRequired: {en: 'Please enter server token first', zh: '请先输入服务器 Token'},
     convertSuccess: {en: 'Conversion successful!', zh: '转换成功！'},
+    convertToLocalSuccess: {en: 'Converted to local archive successfully!', zh: '转为本地存档成功！'},
     convertFailed: {en: 'Conversion failed', zh: '转换失败'},
     deleteSuccess: {en: 'Deleted successfully!', zh: '删除成功！'},
     deleteFailed: {en: 'Delete failed', zh: '删除失败'},
@@ -130,4 +133,5 @@ export const TRANSLATIONS = {
         zh: '缺失模组，请先前往Steam下载之后再按同步模组按钮同步'
     },
     confirm: {en: 'OK', zh: '确定'},
+    openInFolder: {en: 'Open in Folder', zh: '在文件夹中打开'},
 };

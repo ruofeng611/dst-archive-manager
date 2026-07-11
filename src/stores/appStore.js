@@ -93,6 +93,44 @@ export const useAppStore = defineStore('app', () => {
         }
     };
 
+    // 将服务器转为本地存档
+    const convertServerToCluster = async () => {
+        if (!selectedServerId.value) return;
+
+        isConverting.value = true;
+        try {
+            const res = await tauriInvokeUtil('convert_server_to_cluster_handler', {
+                request: {
+                    server_id: selectedServerId.value
+                }
+            });
+
+            if (res.code === 200) {
+                const clusterId = res.data;
+
+                // 从服务器列表中找到对应服务器
+                const server = servers.value.find(s => s.id === selectedServerId.value);
+
+                // 创建新的 cluster 对象
+                const newCluster = {
+                    ...server,
+                    id: clusterId,
+                };
+
+                clusters.value.push(newCluster);
+                selectedClusterId.value = newCluster.id;
+                selectedServerId.value = null;
+
+                ElMessage.success(getTranslation('convertToLocalSuccess'));
+            }
+        } catch (error) {
+            console.error("Convert to local failed", error);
+            ElMessage.error(getTranslation('convertFailed') + ': ' + error.message);
+        } finally {
+            isConverting.value = false;
+        }
+    };
+
     // 更新服务器信息
     const updateServer = (updatedServer) => {
         const index = servers.value.findIndex(s => s.id === updatedServer.id);
@@ -124,11 +162,11 @@ export const useAppStore = defineStore('app', () => {
     };
 
     const changeSelectedServer = (id) => {
-        selectedServerId.value = id;
+        selectedServerId.value = selectedServerId.value === id ? null : id;
     };
 
     const changeSelectedCluster = (id) => {
-        selectedClusterId.value = id;
+        selectedClusterId.value = selectedClusterId.value === id ? null : id;
     };
 
     // 停止服务器
@@ -139,10 +177,10 @@ export const useAppStore = defineStore('app', () => {
             });
 
             if (res.code === 200) {
-                // 更新服务器状态为 stopped
+                // 设置为过渡态 stopping，由轮询确认实际关闭后再改为 stopped
                 const index = servers.value.findIndex(s => s.id === id);
                 if (index !== -1) {
-                    servers.value[index].status = 'stopped';
+                    servers.value[index].status = 'stopping';
                 }
                 ElMessage.success(getTranslation('stopSuccess'));
             }
@@ -257,6 +295,7 @@ export const useAppStore = defineStore('app', () => {
         isConverting,
         updateServer,
         convertCluster,
+        convertServerToCluster,
         changeSelectedServer,
         changeSelectedCluster,
         deleteServer,

@@ -1,5 +1,6 @@
 use crate::service::{
-    ArchivePathService, KEY_DST_CLIENT_PATH, KEY_DST_SERVER_PATH, KEY_STEAM_WORKSHOP_PATH,
+    ArchivePathService, KEY_APP_LANGUAGE, KEY_DST_ARCHIVE_DIR, KEY_DST_CLIENT_PATH, KEY_DST_SERVER_PATH,
+    KEY_STEAM_WORKSHOP_PATH, KEY_DST_USER_DIR,
 };
 use crate::support::JsonResponse;
 use crate::utils::find_window_by_title;
@@ -18,10 +19,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
     SendInput, VIRTUAL_KEY, VK_RETURN,
 };
-use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow};
+use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow, IsIconic, ShowWindow, SW_RESTORE};
 use windows::core::{HSTRING, PCWSTR};
-
-static START_SERVER_BAT_NAME: &str = "StartServer.bat";
 
 #[derive(Deserialize)]
 pub struct ConvertClusterRequest {
@@ -58,16 +57,20 @@ pub async fn convert_cluster_to_server_handler(request: ConvertClusterRequest) -
             ));
         }
 
-        // 2. 获取 DoNotStarveTogether 目录（Cluster 的父目录的父目录）
-        let user_dir = cluster_path_buf.parent().ok_or_else(|| {
-            SimpleAppWebError::new(500, "Cannot get parent directory".to_string())
-        })?;
-        let dst_dir = user_dir.parent().ok_or_else(|| {
-            SimpleAppWebError::new(500, "Cannot get DoNotStarveTogether directory".to_string())
-        })?;
+        // 2. 从 key-value 表获取 DoNotStarveTogether 存档根目录（扫描时已存储）
+        let dst_dir_str = archive_path_service
+            .get_value(KEY_DST_ARCHIVE_DIR)
+            .await?
+            .ok_or_else(|| {
+                SimpleAppWebError::new(
+                    500,
+                    "DST archive directory not found. Please scan archives first.".to_string(),
+                )
+            })?;
+        let dst_dir = PathBuf::from(&dst_dir_str);
 
-        // 3. 获取下一个可用的 Server 编号
-        let server_number = archive_path_service.get_next_server_number().await?;
+        // 3. 扫描 DoNotStarveTogether 目录获取已有的最大 Server 编号，新编号为最大+1
+        let server_number = get_next_folder_number_from_fs(&dst_dir, &constant_component.dst_server_prefix)?;
         let server_id = format!("{}{}", constant_component.dst_server_prefix, server_number);
         let server_path = dst_dir.join(&server_id);
 
@@ -86,7 +89,7 @@ pub async fn convert_cluster_to_server_handler(request: ConvertClusterRequest) -
             request.has_caves,
         )
         .await?;
-        let bat_file_path = server_path.join(START_SERVER_BAT_NAME);
+        let bat_file_path = server_path.join(&constant_component.start_server_bat_name);
         fs::write(&bat_file_path, bat_content)?;
 
         // 7. 保存 Server 路径到数据库
@@ -102,6 +105,69 @@ pub async fn convert_cluster_to_server_handler(request: ConvertClusterRequest) -
         move_client_mods_to_server(&archive_path_service).await?;
 
         Ok(server_id)
+    })
+}
+
+#[derive(Deserialize)]
+pub struct ConvertServerToClusterRequest {
+    pub server_id: String,
+}
+
+/// 将 Server 转为本地 Cluster 存档
+#[auto_command]
+pub async fn convert_server_to_cluster_handler(request: ConvertServerToClusterRequest) -> JsonResponse {
+    json_response_wrap!(function_name = "转为本地存档", {
+        let constant_component: Arc<ConstantComponent> = AppCoreUtil::get_component()?;
+        let archive_path_service: Arc<ArchivePathService> = AppCoreUtil::get_component()?;
+
+        // 1. 获取 Server 的完整路径
+        let server_path = archive_path_service
+            .get_path_by_id(&request.server_id)
+            .await?
+            .ok_or_else(|| {
+                SimpleAppWebError::new(
+                    404,
+                    format!("Server path not found: {}", request.server_id),
+                )
+            })?;
+        let server_path_buf = PathBuf::from(&server_path);
+        if !server_path_buf.exists() {
+            return Err(SimpleAppWebError::new(
+                404,
+                format!("Server path does not exist: {}", server_path),
+            ));
+        }
+
+        // 2. 从 key-value 表获取用户存档目录（DoNotStarveTogether/{用户ID}，Cluster 存放位置）
+        let user_dir_str = archive_path_service
+            .get_value(KEY_DST_USER_DIR)
+            .await?
+            .ok_or_else(|| {
+                SimpleAppWebError::new(
+                    500,
+                    "DST user directory not found. Please scan archives first.".to_string(),
+                )
+            })?;
+        let user_dir = PathBuf::from(&user_dir_str);
+
+        // 3. 扫描获取已有的最大 Cluster 编号，新编号为最大+1
+        let cluster_number = get_next_folder_number_from_fs(&user_dir, &constant_component.dst_cluster_prefix)?;
+        let cluster_id = format!("{}{}", constant_component.dst_cluster_prefix, cluster_number);
+        let cluster_path = user_dir.join(&cluster_id);
+
+        // 4. 复制 Server 文件夹到新的 Cluster 位置
+        copy_dir_all(&server_path_buf, &cluster_path)?;
+
+        // 5. 保存 Cluster 路径到数据库
+        archive_path_service
+            .save_archive_path(
+                cluster_id.clone(),
+                "cluster".to_string(),
+                cluster_path.to_string_lossy().into_owned(),
+            )
+            .await?;
+
+        Ok(cluster_id)
     })
 }
 
@@ -234,6 +300,7 @@ async fn generate_start_server_bat(
     archive_path_service: &ArchivePathService,
     has_caves: bool,
 ) -> Result<String, SimpleAppWebError> {
+    let cc = AppCoreUtil::get_component::<ConstantComponent>()?;
     // 获取 DST 服务器路径和 Steam Workshop 路径
     let dst_server_path = archive_path_service
         .get_value(KEY_DST_SERVER_PATH)
@@ -264,23 +331,27 @@ set COMMON_UGC_PATH="{}"
 
 cd /D "{}"
 
-start "{}_Master" dontstarve_dedicated_server_nullrenderer.exe -console -cluster {} -shard Master -ugc_directory %COMMON_UGC_PATH%
+start "{}_{}" dontstarve_dedicated_server_nullrenderer.exe -console -cluster {} -shard {} -ugc_directory %COMMON_UGC_PATH%
 "#,
         steam_app_id,
         steam_app_id,
         workshop_path,
         bin_path.to_string_lossy(),
         server_id,
-        server_id
+        cc.master_shard_name,
+        server_id,
+        cc.master_shard_name
     );
 
     // 如果有洞穴，添加洞穴服务器启动命令
     if has_caves {
         bat_content.push_str(&format!(r#"
-start "{}_Caves" dontstarve_dedicated_server_nullrenderer.exe -console -cluster {} -shard Caves -ugc_directory %COMMON_UGC_PATH%
+start "{}_{}" dontstarve_dedicated_server_nullrenderer.exe -console -cluster {} -shard {} -ugc_directory %COMMON_UGC_PATH%
 "#,
             server_id,
-            server_id
+            cc.caves_shard_name,
+            server_id,
+            cc.caves_shard_name
         ));
     }
 
@@ -292,6 +363,7 @@ start "{}_Caves" dontstarve_dedicated_server_nullrenderer.exe -console -cluster 
 pub async fn start_server_handler(server_id: String) -> JsonResponse {
     json_response_wrap!(function_name = "启动服务器", {
         let archive_path_service: Arc<ArchivePathService> = AppCoreUtil::get_component()?;
+        let cc = AppCoreUtil::get_component::<ConstantComponent>()?;
 
         // 1. 获取 Server 的完整路径
         let server_path = archive_path_service
@@ -312,17 +384,17 @@ pub async fn start_server_handler(server_id: String) -> JsonResponse {
         }
 
         // 2. 检查 StartServer.bat 文件是否存在
-        let bat_file_path = server_path_buf.join(START_SERVER_BAT_NAME);
+        let bat_file_path = server_path_buf.join(&cc.start_server_bat_name);
         if !bat_file_path.exists() {
             return Err(SimpleAppWebError::new(
                 404,
-                format!("{} not found in: {}", START_SERVER_BAT_NAME, server_path),
+                format!("{} not found in: {}", cc.start_server_bat_name, server_path),
             ));
         }
 
         // 3. 检查服务器是否已在运行
-        let master_title = format!("{}_Master", server_id);
-        let caves_title = format!("{}_Caves", server_id);
+        let master_title = format!("{}_{}", server_id, cc.master_shard_name);
+        let caves_title = format!("{}_{}", server_id, cc.caves_shard_name);
         let master_running = find_window_by_title(&master_title);
         let caves_running = find_window_by_title(&caves_title);
 
@@ -356,8 +428,9 @@ pub async fn start_server_handler(server_id: String) -> JsonResponse {
 #[auto_command]
 pub async fn query_server_status_handler(server_id: String) -> JsonResponse {
     json_response_wrap!(function_name = "查询服务器状态", {
-        let master_title = format!("{}_Master", server_id);
-        let caves_title = format!("{}_Caves", server_id);
+        let cc = AppCoreUtil::get_component::<ConstantComponent>()?;
+        let master_title = format!("{}_{}", server_id, cc.master_shard_name);
+        let caves_title = format!("{}_{}", server_id, cc.caves_shard_name);
 
         let master_running = find_window_by_title(&master_title);
         let caves_running = find_window_by_title(&caves_title);
@@ -382,8 +455,9 @@ pub async fn query_server_status_handler(server_id: String) -> JsonResponse {
 #[auto_command]
 pub async fn stop_server_handler(server_id: String) -> JsonResponse {
     json_response_wrap!(function_name = "停止服务器", {
-        let master_title = format!("{}_Master", server_id);
-        let caves_title = format!("{}_Caves", server_id);
+        let cc = AppCoreUtil::get_component::<ConstantComponent>()?;
+        let master_title = format!("{}_{}", server_id, cc.master_shard_name);
+        let caves_title = format!("{}_{}", server_id, cc.caves_shard_name);
 
         // 查找并停止洞穴服务器（洞穴服务器可能不存在，不检查结果）
         let _ = find_and_send_shutdown_command(&caves_title);
@@ -412,7 +486,13 @@ fn find_and_send_shutdown_command(window_title: &str) -> Result<bool, SimpleAppW
         let hwnd: HWND = FindWindowW(None, PCWSTR::from_raw(wide_title.as_ptr()))?;
 
         if !hwnd.is_invalid() {
-            // 找到窗口，激活它（必须激活才能接收输入）
+            // 如果窗口已最小化，先恢复窗口
+            if IsIconic(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+                thread::sleep(Duration::from_millis(300));
+            }
+
+            // 激活窗口（必须激活才能接收输入）
             let _ = SetForegroundWindow(hwnd);
 
             // 等待窗口激活
@@ -509,4 +589,79 @@ fn send_key_press(vk: VIRTUAL_KEY) {
 
         let _ = SendInput(&[input_up], size_of::<INPUT>() as i32);
     }
+}
+
+/// 语言设置请求
+#[derive(Deserialize)]
+pub struct SetLanguageRequest {
+    pub language: String, // "zh" 或 "en"
+}
+
+/// 设置应用语言
+#[auto_command]
+pub async fn set_app_language_handler(request: SetLanguageRequest) -> JsonResponse {
+    json_response_wrap!(function_name = "设置语言", {
+        let archive_path_service: Arc<ArchivePathService> = AppCoreUtil::get_component()?;
+        archive_path_service
+            .set_value(KEY_APP_LANGUAGE, &request.language)
+            .await?;
+        Ok(())
+    })
+}
+
+/// 获取应用语言
+#[auto_command]
+pub async fn get_app_language_handler() -> JsonResponse {
+    json_response_wrap!(function_name = "获取语言", {
+        let archive_path_service: Arc<ArchivePathService> = AppCoreUtil::get_component()?;
+        // 默认返回 "zh"
+        let language = archive_path_service
+            .get_value(KEY_APP_LANGUAGE)
+            .await?
+            .unwrap_or_else(|| "zh".to_string());
+        Ok(language)
+    })
+}
+
+/// 在 Windows 资源管理器中打开指定存档的文件夹
+#[auto_command]
+pub async fn open_archive_in_folder_handler(id: String) -> JsonResponse {
+    json_response_wrap!(function_name = "在文件夹中打开", {
+        let archive_path_service: Arc<ArchivePathService> = AppCoreUtil::get_component()?;
+        let path = archive_path_service
+            .get_path_by_id(&id)
+            .await?
+            .ok_or_else(|| {
+                SimpleAppWebError::new(404, format!("Path not found: {}", id))
+            })?;
+        // 在 Windows 资源管理器中打开文件夹
+        std::process::Command::new("explorer")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| SimpleAppWebError::new(500, format!("Failed to open folder: {}", e)))?;
+        Ok(())
+    })
+}
+
+/// 扫描指定目录下所有带指定前缀的文件夹，返回最大编号 + 1
+/// 例如存在 Cluster_1、Cluster_3 → 返回 4
+fn get_next_folder_number_from_fs(
+    dst_dir: &std::path::Path,
+    prefix: &str,
+) -> Result<i32, SimpleAppWebError> {
+    let mut max_num = 0;
+    if let Ok(entries) = fs::read_dir(dst_dir) {
+        for entry in entries.flatten() {
+            if let Some(folder_name) = entry.file_name().to_str() {
+                if let Some(num_str) = folder_name.strip_prefix(prefix) {
+                    if let Ok(num) = num_str.parse::<i32>() {
+                        if num > max_num {
+                            max_num = num;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(max_num + 1)
 }

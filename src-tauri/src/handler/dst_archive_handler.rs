@@ -1,10 +1,13 @@
 use crate::service::ArchivePathService;
+use crate::service::{KEY_DST_ARCHIVE_DIR, KEY_DST_USER_DIR};
 use crate::support::JsonResponse;
 use crate::support::SimpleAppWebError;
+use crate::utils::decode_file_content;
 use crate::utils::find_window_by_title;
 use crate::vo::{ArchiveDetailVO, ArchivePhaseVO, ArchiveScanVO};
 use crate::{ConstantComponent, json_response_wrap};
 use ini::Ini;
+use mlua::{Lua, Value};
 use regex::Regex;
 use serde::Deserialize;
 use simple_starter_core::AppCoreUtil;
@@ -33,7 +36,7 @@ pub async fn scan_dst_archives_handler(custom_path: Option<String>) -> JsonRespo
             path
         } else {
             if let Some(doc) = dirs::document_dir() {
-                doc.join("Klei")
+                doc.join(&constant_component.klei_folder_name)
                     .join(&constant_component.dst_archive_file_name)
             } else {
                 return Ok(result);
@@ -46,6 +49,10 @@ pub async fn scan_dst_archives_handler(custom_path: Option<String>) -> JsonRespo
             result.found = true;
             // DoNotStarveTogether文件夹全路径
             result.path = base_path.to_string_lossy().into_owned();
+            // 存储 dst 存档目录到 key-value 表，供后续转换接口使用
+            let _ = archive_path_service
+                .set_value(KEY_DST_ARCHIVE_DIR, &result.path)
+                .await;
         }
 
         let mut all_clusters = Vec::new();
@@ -59,6 +66,10 @@ pub async fn scan_dst_archives_handler(custom_path: Option<String>) -> JsonRespo
                     if let Some(folder_name) = entry_path.file_name().and_then(|n| n.to_str()) {
                         // 检查是否为纯数字文件夹（用户ID文件夹）
                         if folder_name.chars().all(|c| c.is_ascii_digit()) {
+                            // 存储用户目录到 key-value 表，供后续 Server→Cluster 转换使用
+                            let _ = archive_path_service
+                                .set_value(KEY_DST_USER_DIR, &entry_path.to_string_lossy())
+                                .await;
                             // 在数字文件夹下查找Cluster_X目录
                             if let Ok(cluster_entries) = fs::read_dir(&entry_path) {
                                 for cluster_entry in cluster_entries.flatten() {
@@ -67,7 +78,7 @@ pub async fn scan_dst_archives_handler(custom_path: Option<String>) -> JsonRespo
                                         if let Some(cluster_name) =
                                             cluster_path.file_name().and_then(|n| n.to_str())
                                         {
-                                            if cluster_name.starts_with("Cluster_") {
+                                            if cluster_name.starts_with(&constant_component.dst_cluster_prefix) {
                                                 // 解析Cluster信息
                                                 let cluster_detail = parse_archive_detail(
                                                     &cluster_path,
@@ -91,7 +102,7 @@ pub async fn scan_dst_archives_handler(custom_path: Option<String>) -> JsonRespo
                             }
                         }
                         // 检查是否为Server_X目录（直接在DoNotStarveTogether下的服务器目录）
-                        else if folder_name.starts_with("Server_") {
+                        else if folder_name.starts_with(&constant_component.dst_server_prefix) {
                             let server_detail = parse_archive_detail(&entry_path, folder_name)?;
 
                             // 保存路径到数据库
@@ -118,14 +129,15 @@ pub async fn scan_dst_archives_handler(custom_path: Option<String>) -> JsonRespo
 }
 
 /// 检查指定服务器是否正在运行（通过查找命令行窗口标题）
-fn check_server_status(server_id: &str) -> String {
-    let found_master = find_window_by_title(&format!("{}_Master", server_id));
-    let found_caves = find_window_by_title(&format!("{}_Caves", server_id));
+fn check_server_status(server_id: &str) -> Result<String, SimpleAppWebError> {
+    let cc = AppCoreUtil::get_component::<ConstantComponent>()?;
+    let found_master = find_window_by_title(&format!("{}_{}", server_id, cc.master_shard_name));
+    let found_caves = find_window_by_title(&format!("{}_{}", server_id, cc.caves_shard_name));
 
     if found_master || found_caves {
-        "running".to_string()
+        Ok("running".to_string())
     } else {
-        "stopped".to_string()
+        Ok("stopped".to_string())
     }
 }
 
@@ -187,12 +199,13 @@ fn parse_archive_detail(
     vo.archive_phase_vo = parse_archive_phases(&folder_path)?;
 
     // 检测是否有洞穴（Caves 文件夹是否存在）
-    let caves_path = folder_path.join("Caves");
+    let cc = AppCoreUtil::get_component::<ConstantComponent>()?;
+    let caves_path = folder_path.join(&cc.caves_shard_name);
     vo.has_caves = caves_path.exists() && caves_path.is_dir();
 
     // 检测服务器运行状态（仅对 Server_X 类型的 ID）
-    if id.starts_with("Server_") {
-        vo.status = check_server_status(id);
+    if id.starts_with(&cc.dst_server_prefix) {
+        vo.status = check_server_status(id)?;
     } else {
         vo.status = "stopped".to_string();
     }
@@ -208,7 +221,11 @@ fn parse_archive_detail(
 fn parse_archive_phases(folder_path: &Path) -> Result<Vec<ArchivePhaseVO>, SimpleAppWebError> {
     let mut phases = Vec::new();
 
-    let session_dir = folder_path.join("Master").join("save").join("session");
+    let cc = AppCoreUtil::get_component::<ConstantComponent>()?;
+    let session_dir = folder_path
+        .join(&cc.master_shard_name)
+        .join(&cc.save_folder_name)
+        .join(&cc.session_folder_name);
     if !session_dir.is_dir() {
         return Ok(phases);
     }
@@ -290,8 +307,15 @@ fn parse_archive_phases(folder_path: &Path) -> Result<Vec<ArchivePhaseVO>, Simpl
 
 /// 同步 Master 和 Caves 的存档文件，删除不一致的存档
 fn sync_archive_files(folder_path: &Path) -> Result<(), SimpleAppWebError> {
-    let master_session_dir = folder_path.join("Master").join("save").join("session");
-    let caves_session_dir = folder_path.join("Caves").join("save").join("session");
+    let cc = AppCoreUtil::get_component::<ConstantComponent>()?;
+    let master_session_dir = folder_path
+        .join(&cc.master_shard_name)
+        .join(&cc.save_folder_name)
+        .join(&cc.session_folder_name);
+    let caves_session_dir = folder_path
+        .join(&cc.caves_shard_name)
+        .join(&cc.save_folder_name)
+        .join(&cc.session_folder_name);
 
     // 如果 Caves 目录不存在，则无需同步
     if !caves_session_dir.exists() {
@@ -446,27 +470,53 @@ pub async fn update_server_config_handler(config: UpdateServerConfigRequest) -> 
     })
 }
 
-/// 解析 modoverrides.lua 文件，提取模组ID列表
+/// 解析 modoverrides.lua 文件，通过执行 Lua 脚本提取模组ID列表
 /// 返回 workshop-XXX 格式的模组ID列表
 fn parse_level_data_override(folder_path: &Path) -> Result<Vec<String>, SimpleAppWebError> {
     let mut mod_ids = Vec::new();
 
-    let level_data_path = folder_path.join("Master").join("modoverrides.lua");
+    let cc = AppCoreUtil::get_component::<ConstantComponent>()?;
+    let level_data_path = folder_path
+        .join(&cc.master_shard_name)
+        .join(&cc.modoverrides_file_name);
 
     // 如果文件不存在，返回空列表
     if !level_data_path.exists() {
         return Ok(mod_ids);
     }
 
-    let content = fs::read_to_string(&level_data_path)?;
+    // 读取文件字节并用 decode_file_content 解码（处理 GBK 等非 UTF-8 编码）
+    let bytes = fs::read(&level_data_path)?;
+    let content = decode_file_content(&bytes);
 
-    // 使用正则表达式匹配 ["workshop-XXXX"] 或 ["workshop-XXXX"]= 格式
-    // 匹配 workshop- 后跟数字的格式
-    let workshop_re = Regex::new(r#"\["(workshop-\d+)"]"#)?;
+    // 使用 Lua 解释器执行 modoverrides.lua 脚本
+    let lua = Lua::new();
 
-    for cap in workshop_re.captures_iter(&content) {
-        if let Some(mod_id) = cap.get(1) {
-            mod_ids.push(mod_id.as_str().to_string());
+    // 执行脚本并获取返回值（modoverrides.lua 返回一个 Table）
+    let result: Value = match lua
+        .load(&content)
+        .set_name(&cc.modoverrides_file_name)
+        .eval()
+    {
+        Ok(v) => v,
+        Err(_) => return Ok(mod_ids), // 执行失败返回空列表
+    };
+
+    // 遍历返回的 Table，提取所有 workshop-xxx 格式的键
+    if let Value::Table(table) = result {
+        if let Ok(pairs) = table
+            .pairs()
+            .collect::<Result<Vec<(Value, Value)>, _>>()
+        {
+            for (key, _value) in pairs {
+                if let Value::String(s) = key {
+                    if let Ok(key_str) = s.to_str() {
+                        if key_str.starts_with("workshop-") {
+                            mod_ids.push(key_str.to_string());
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -495,15 +545,22 @@ pub async fn delete_archive_phase_handler(request: DeleteArchivePhaseRequest) ->
             })?;
 
         let server_path = PathBuf::from(server_path);
+        let cc = AppCoreUtil::get_component::<ConstantComponent>()?;
 
         // 删除 Master 中的存档文件
-        let master_session_dir = server_path.join("Master").join("save").join("session");
+        let master_session_dir = server_path
+            .join(&cc.master_shard_name)
+            .join(&cc.save_folder_name)
+            .join(&cc.session_folder_name);
         if let Some(master_session_path) = get_session_path(&master_session_dir)? {
             delete_archive_files(&master_session_path, &request.phase_file_name)?;
         }
 
         // 删除 Caves 中的存档文件（如果存在）
-        let caves_session_dir = server_path.join("Caves").join("save").join("session");
+        let caves_session_dir = server_path
+            .join(&cc.caves_shard_name)
+            .join(&cc.save_folder_name)
+            .join(&cc.session_folder_name);
         if caves_session_dir.exists() {
             if let Some(caves_session_path) = get_session_path(&caves_session_dir)? {
                 delete_archive_files(&caves_session_path, &request.phase_file_name)?;

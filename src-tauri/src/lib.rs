@@ -29,6 +29,14 @@ pub struct ConstantComponent {
     pub cluster_token_file: String,
     pub dst_end_command: String,
     pub cluster_ini_file: String,
+    pub klei_folder_name: String,
+    pub master_shard_name: String,
+    pub caves_shard_name: String,
+    pub modinfo_file_name: String,
+    pub modoverrides_file_name: String,
+    pub start_server_bat_name: String,
+    pub save_folder_name: String,
+    pub session_folder_name: String,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -51,6 +59,14 @@ pub fn run() {
             cluster_token_file = "cluster_token.txt"
             dst_end_command = "c_shutdown()"
             cluster_ini_file = "cluster.ini"
+            klei_folder_name = "Klei"
+            master_shard_name = "Master"
+            caves_shard_name = "Caves"
+            modinfo_file_name = "modinfo.lua"
+            modoverrides_file_name = "modoverrides.lua"
+            start_server_bat_name = "StartServer.bat"
+            save_folder_name = "save"
+            session_folder_name = "session"
 
             [database]
             db_path = "dst_data.db"

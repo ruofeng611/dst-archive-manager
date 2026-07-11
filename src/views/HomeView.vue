@@ -86,14 +86,31 @@
 
       <!-- Left Col: Local Clusters -->
       <div
-          class="col-span-3 bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 flex flex-col overflow-hidden min-h-0">
-        <div class="p-3 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50">
-          <h3 class="font-semibold text-sm flex items-center gap-2">
-            <FileDigit :size="16"/>
-            {{ t.localSaves[lang] }}
-          </h3>
+          class="col-span-3 flex flex-col gap-4 min-h-0">
+
+        <!-- Convert to Server Action -->
+        <div class="flex-none flex justify-center items-center py-2">
+          <button
+              @click="appStore.convertCluster"
+              :disabled="!appStore.selectedClusterId || appStore.isConverting"
+              class="w-full bg-linear-to-r from-orange-500 to-red-600 hover:from-orange-600 hover:to-red-700 text-white font-semibold py-3 px-4 rounded-lg shadow-md disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all transform active:scale-95"
+          >
+            <RefreshCw v-if="appStore.isConverting" class="animate-spin" :size="20"/>
+            <ArrowRight v-else :size="20"/>
+            {{ t.convert[lang] }}
+          </button>
         </div>
-        <div class="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+
+        <!-- Clusters List -->
+        <div
+            class="flex-1 bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 flex flex-col overflow-hidden min-h-0">
+          <div class="p-3 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50">
+            <h3 class="font-semibold text-sm flex items-center gap-2">
+              <FileDigit :size="16"/>
+              {{ t.localSaves[lang] }}
+            </h3>
+          </div>
+          <div class="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
           <div v-if="appStore.clusters.length === 0" class="text-center py-10 text-gray-400 text-sm">
             No clusters found.<br/>Check path settings.
           </div>
@@ -101,6 +118,7 @@
               v-for="cluster in appStore.clusters"
               :key="cluster.id"
               @click="appStore.changeSelectedCluster(cluster.id)"
+                            @contextmenu.prevent="showContextMenu($event, cluster.id)"
               class="p-3 rounded-md cursor-pointer transition-all border"
               :class="appStore.selectedClusterId === cluster.id
               ? 'bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-700 ring-1 ring-blue-400'
@@ -130,23 +148,11 @@
             </div>
           </div>
         </div>
+        </div>
       </div>
 
-      <!-- Middle Col: Conversion Action & Server List -->
+      <!-- Middle Col: Server List & Convert to Local -->
       <div class="col-span-3 flex flex-col gap-4 min-h-0">
-
-        <!-- Action Area -->
-        <div class="flex-none flex justify-center items-center py-2">
-          <button
-              @click="appStore.convertCluster"
-              :disabled="!appStore.selectedClusterId || appStore.isConverting"
-              class="w-full bg-linear-to-r from-orange-500 to-red-600 hover:from-orange-600 hover:to-red-700 text-white font-semibold py-3 px-4 rounded-lg shadow-md disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all transform active:scale-95"
-          >
-            <RefreshCw v-if="appStore.isConverting" class="animate-spin" :size="20"/>
-            <ArrowRight v-else :size="20"/>
-            {{ t.convert[lang] }}
-          </button>
-        </div>
 
         <!-- Server List -->
         <div
@@ -162,6 +168,7 @@
                 v-for="server in appStore.servers"
                 :key="server.id"
                 @click="appStore.changeSelectedServer(server.id)"
+                                @contextmenu.prevent="showContextMenu($event, server.id)"
                 class="p-3 rounded-md cursor-pointer transition-all border group"
                 :class="appStore.selectedServerId === server.id
                 ? 'bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-700 ring-1 ring-blue-400'
@@ -194,6 +201,19 @@
             </div>
           </div>
         </div>
+
+        <!-- Convert to Local Action -->
+        <div class="flex-none flex justify-center items-center py-2">
+          <button
+              @click="appStore.convertServerToCluster"
+              :disabled="!appStore.selectedServerId || appStore.isConverting"
+              class="w-full bg-linear-to-r from-blue-500 to-cyan-600 hover:from-blue-600 hover:to-cyan-700 text-white font-semibold py-3 px-4 rounded-lg shadow-md disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all transform active:scale-95"
+          >
+            <RefreshCw v-if="appStore.isConverting" class="animate-spin" :size="20"/>
+            <ArrowLeft v-else :size="20"/>
+            {{ t.convertToLocal[lang] }}
+          </button>
+        </div>
       </div>
 
       <!-- Right Col: Server Details -->
@@ -216,14 +236,37 @@
       </div>
 
     </main>
+
+    <!-- 右键菜单遮罩（点击任意位置关闭） -->
+    <div
+        v-if="contextMenu.visible"
+        class="fixed inset-0 z-40"
+        @click="closeContextMenu"
+        @contextmenu.prevent="closeContextMenu"
+    ></div>
+
+    <!-- 右键菜单 -->
+    <div
+        v-if="contextMenu.visible"
+        class="fixed z-50 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-xl py-1 min-w-[180px]"
+        :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }"
+    >
+      <div
+          @click="openInFolder"
+          class="flex items-center gap-2 px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer transition-colors"
+      >
+        <FolderOpen :size="16"/>
+        <span>{{ t.openInFolder[lang] }}</span>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import {computed, onMounted} from 'vue';
+import {computed, onMounted, ref} from 'vue';
 import {
   Settings, RefreshCw, Key, HardDrive, Server, FileDigit,
-  ArrowRight, Trash2, Languages, Moon, Sun
+  ArrowRight, ArrowLeft, Trash2, Languages, Moon, Sun, FolderOpen
 } from 'lucide-vue-next';
 import {TRANSLATIONS} from '@/constants';
 import {useSettingsStore} from '@/stores/settingsStore';
@@ -247,15 +290,51 @@ const selectedServer = computed(() =>
     appStore.servers.find(s => s.id === appStore.selectedServerId)
 );
 
-// 初始化加载
-onMounted(() => {
-  scanMods();
-  scanArchives();
+// --- 右键菜单 ---
+const contextMenu = ref({
+  visible: false,
+  x: 0,
+  y: 0,
+  archiveId: null
 });
 
-// 切换语言
-const toggleLanguage = () => {
-  settingsStore.language = settingsStore.language === 'en' ? 'zh' : 'en';
+const showContextMenu = (event, archiveId) => {
+  contextMenu.value = {
+    visible: true,
+    x: event.clientX,
+    y: event.clientY,
+    archiveId
+  };
+};
+
+const closeContextMenu = () => {
+  contextMenu.value.visible = false;
+};
+
+const openInFolder = async () => {
+  const id = contextMenu.value.archiveId;
+  if (!id) return;
+  closeContextMenu();
+  await tauriInvokeUtil('open_archive_in_folder_handler', { id }, { showLoading: false });
+};
+
+// 初始化加载
+onMounted(async () => {
+  // 先加载后端语言设置
+  await settingsStore.loadLanguage();
+  // 再扫描数据（此时 locale 已就绪，模组名会根据语言正确显示）
+  await scanMods();
+  await scanArchives();
+});
+
+// 切换语言：保存到后端并重新查询数据（使模组名按新语言显示）
+const toggleLanguage = async () => {
+  const newLang = settingsStore.language === 'en' ? 'zh' : 'en';
+  settingsStore.language = newLang;
+  await settingsStore.saveLanguage(newLang);
+  // 切换语言后重新扫描，模组名会按新 locale 重新解析
+  await scanMods();
+  await scanArchives();
 };
 
 // 删除确认

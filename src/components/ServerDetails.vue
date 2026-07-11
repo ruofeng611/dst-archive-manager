@@ -19,10 +19,10 @@
           @click="toggleStatus"
           :disabled="server.status === 'starting'"
           class="flex items-center gap-2 px-4 py-2 rounded-md font-medium text-white transition-all shadow-sm disabled:opacity-50 disabled:cursor-wait"
-          :class="server.status === 'running' ? 'bg-red-500 hover:bg-red-600' : 'bg-green-600 hover:bg-green-700'"
+          :class="(server.status === 'running' || server.status === 'stopping') ? 'bg-red-500 hover:bg-red-600' : 'bg-green-600 hover:bg-green-700'"
       >
-        <component :is="server.status === 'running' ? Square : Play" :size="18" fill="currentColor"/>
-        {{ server.status === 'running' ? t.stop[lang] : t.start[lang] }}
+        <component :is="(server.status === 'running' || server.status === 'stopping') ? Square : Play" :size="18" fill="currentColor"/>
+        {{ (server.status === 'running' || server.status === 'stopping') ? t.stop[lang] : t.start[lang] }}
       </button>
     </div>
 
@@ -239,7 +239,7 @@
 </template>
 
 <script setup>
-import {ref, computed, watch, reactive, onMounted, onUnmounted} from 'vue';
+import {ref, computed, watch, reactive, onUnmounted} from 'vue';
 import {
   Play,
   Square,
@@ -317,6 +317,7 @@ const localConfig = reactive({...props.server});
 
 // 定时器相关
 let statusTimer = null;
+let stoppedCount = 0;
 
 // 查询服务器状态
 const queryServerStatus = async () => {
@@ -326,9 +327,23 @@ const queryServerStatus = async () => {
     const res = await tauriInvokeUtil('query_server_status_handler', {serverId: props.server.id}, {showLoading: false});
     if (res.code === 200 && res.data) {
       const newStatus = res.data.status;
-      // 只有当状态发生变化时才更新
-      if (newStatus !== props.server.status) {
-        emit('update', {...props.server, status: newStatus});
+
+      if (newStatus === 'stopped') {
+        stoppedCount++;
+        // 首次查到已关闭 → 按钮变为"启动服务器"
+        if (stoppedCount === 1) {
+          emit('update', {...props.server, status: 'stopped'});
+        }
+        // 连续 3 次 stopped → 停止轮询
+        if (stoppedCount >= 3) {
+          stopStatusTimer();
+        }
+      } else {
+        // 查到非 stopped（running）→ 重置计数，状态改回 stopping
+        stoppedCount = 0;
+        if (props.server.status !== 'stopping') {
+          emit('update', {...props.server, status: 'stopping'});
+        }
       }
     }
   } catch (error) {
@@ -339,7 +354,8 @@ const queryServerStatus = async () => {
 
 // 启动定时器
 const startStatusTimer = () => {
-  if (statusTimer) return;
+  stoppedCount = 0; // 重置计数
+  if (statusTimer) return; // 已在运行
   // 立即执行一次
   queryServerStatus();
   // 每3秒查询一次
@@ -354,21 +370,26 @@ const stopStatusTimer = () => {
   }
 };
 
-// 组件挂载时启动定时器
-onMounted(() => {
-  startStatusTimer();
-});
-
 // 组件卸载时停止定时器
 onUnmounted(() => {
   stopStatusTimer();
 });
 
-// 当服务器切换时，重置定时器
+// 当服务器切换时，停止旧定时器；若新服务器状态为 stopping，启动轮询
 watch(() => props.server?.id, (newId, oldId) => {
   if (newId !== oldId) {
-    // 立即查询新服务器状态
-    queryServerStatus();
+    stopStatusTimer();
+    // 切换到新服务器后，检查是否需要恢复轮询
+    if (props.server?.status === 'stopping') {
+      startStatusTimer();
+    }
+  }
+});
+
+// 当状态变为 stopping 时，启动轮询确认服务器关闭
+watch(() => props.server?.status, (newStatus) => {
+  if (newStatus === 'stopping') {
+    startStatusTimer();
   }
 });
 
@@ -380,6 +401,7 @@ watch(() => props.server, (newServer) => {
 const statusColor = computed(() => {
   if (props.server.status === 'running') return 'text-green-500';
   if (props.server.status === 'starting') return 'text-yellow-500';
+  if (props.server.status === 'stopping') return 'text-yellow-500';
   return 'text-gray-400';
 });
 
@@ -426,8 +448,8 @@ const saveConfig = async () => {
 };
 
 const toggleStatus = () => {
-  if (props.server.status === 'running') {
-    // 停止服务器
+  if (props.server.status === 'running' || props.server.status === 'stopping') {
+    // 停止服务器（stopping 状态也可再次点击关闭）
     emit('stop', props.server.id);
   } else {
     // 启动服务器

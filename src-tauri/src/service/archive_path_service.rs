@@ -8,10 +8,12 @@ use simple_starter_macro::component;
 use std::sync::Arc;
 
 /// Key 常量定义
-pub const KEY_NEXT_SERVER_NUMBER: &str = "next_server_number";
 pub const KEY_STEAM_WORKSHOP_PATH: &str = "steam_workshop_path";
 pub const KEY_DST_SERVER_PATH: &str = "dst_server_path";
 pub const KEY_DST_CLIENT_PATH: &str = "dst_client_path";
+pub const KEY_DST_ARCHIVE_DIR: &str = "dst_archive_dir";
+pub const KEY_DST_USER_DIR: &str = "dst_user_dir";
+pub const KEY_APP_LANGUAGE: &str = "app_language";
 
 #[component(init_method = "init")]
 pub struct ArchivePathService {
@@ -47,9 +49,9 @@ impl ArchivePathService {
             )
             .await?;
 
-        // 初始化 next_server_number，如果不存在
-        if self.get_value(KEY_NEXT_SERVER_NUMBER).await?.is_none() {
-            self.set_value(KEY_NEXT_SERVER_NUMBER, "1").await?;
+        // 初始化 app_language，默认中文
+        if self.get_value(KEY_APP_LANGUAGE).await?.is_none() {
+            self.set_value(KEY_APP_LANGUAGE, "zh").await?;
         }
 
         Ok(())
@@ -147,19 +149,5 @@ impl ArchivePathService {
             .await?;
 
         Ok(())
-    }
-
-    /// 获取下一个可用的 Server 编号并自动增加
-    pub async fn get_next_server_number(&self) -> Result<i32, DbErr> {
-        let current_value = self.get_value(KEY_NEXT_SERVER_NUMBER).await?;
-        let next_number = current_value
-            .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or(1);
-
-        // 更新计数器
-        self.set_value(KEY_NEXT_SERVER_NUMBER, &(next_number + 1).to_string())
-            .await?;
-
-        Ok(next_number)
     }
 }

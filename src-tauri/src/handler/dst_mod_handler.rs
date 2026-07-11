@@ -1,17 +1,18 @@
 use crate::service::{
-    ArchivePathService, KEY_DST_CLIENT_PATH, KEY_DST_SERVER_PATH, KEY_STEAM_WORKSHOP_PATH,
+    ArchivePathService, KEY_APP_LANGUAGE, KEY_DST_CLIENT_PATH, KEY_DST_SERVER_PATH,
+    KEY_STEAM_WORKSHOP_PATH,
 };
 use crate::support::JsonResponse;
-use crate::utils::get_all_steam_libraries;
+use crate::utils::{decode_file_content, get_all_steam_libraries};
 use crate::vo::{ModInfoVO, ModScanVO};
 use crate::{ConstantComponent, SimpleAppWebError, json_response_wrap};
-use regex::Regex;
 use simple_starter_core::AppCoreUtil;
 use simple_starter_core::tracing::error;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri_macros::auto_command;
+use mlua::{Lua, Value};
 
 #[auto_command]
 pub async fn scan_dst_mods_handler(custom_path: Option<String>) -> JsonResponse {
@@ -115,10 +116,17 @@ pub async fn scan_dst_mods_handler(custom_path: Option<String>) -> JsonResponse 
                     .await;
             }
 
+            // 从数据库读取应用语言设置，用于 Lua 执行 modinfo.lua 时的 locale
+            let locale = archive_path_service
+                .get_value(KEY_APP_LANGUAGE)
+                .await
+                .unwrap_or(None)
+                .unwrap_or_else(|| "zh".to_string());
+
             // 2.1 扫描服务器端 mods (server/mods/workshop*)
             let server_mods_path = server_path.join("mods");
             if server_mods_path.exists() {
-                scan_mods_directory(&server_mods_path, &mut result.mods)?;
+                scan_mods_directory(&server_mods_path, &mut result.mods, &locale)?;
             }
 
             // 2.2 扫描 Steam Workshop (322330)
@@ -131,7 +139,7 @@ pub async fn scan_dst_mods_handler(custom_path: Option<String>) -> JsonResponse 
                     .join(&constant_component.dst_steam_id);
 
                 if workshop_path.exists() {
-                    scan_workshop_directory(&workshop_path, &mut result.mods)?;
+                    scan_workshop_directory(&workshop_path, &mut result.mods, &locale)?;
                 }
             }
         } else {
@@ -146,6 +154,7 @@ pub async fn scan_dst_mods_handler(custom_path: Option<String>) -> JsonResponse 
 fn scan_mods_directory(
     mods_path: &PathBuf,
     mods: &mut Vec<ModInfoVO>,
+    locale: &str,
 ) -> Result<(), SimpleAppWebError> {
     for entry in fs::read_dir(mods_path)? {
         let entry = entry?;
@@ -155,7 +164,7 @@ fn scan_mods_directory(
         if entry.file_type()?.is_dir() && name.starts_with("workshop") {
             let mod_path = entry.path();
             // 只有存在 modinfo.lua 文件时才添加到列表
-            if let Some(mod_name) = extract_mod_name_from_modinfo(&mod_path) {
+            if let Some(mod_name) = extract_mod_name_from_modinfo(&mod_path, locale) {
                 mods.push(ModInfoVO {
                     folder_name: name,
                     mod_name,
@@ -170,6 +179,7 @@ fn scan_mods_directory(
 fn scan_workshop_directory(
     workshop_path: &PathBuf,
     mods: &mut Vec<ModInfoVO>,
+    locale: &str,
 ) -> Result<(), SimpleAppWebError> {
     for entry in fs::read_dir(workshop_path)? {
         let entry = entry?;
@@ -178,7 +188,7 @@ fn scan_workshop_directory(
             let folder_name = entry.file_name().to_string_lossy().to_string();
             let mod_path = entry.path();
             // 只有存在 modinfo.lua 文件时才添加到列表
-            if let Some(mod_name) = extract_mod_name_from_modinfo(&mod_path) {
+            if let Some(mod_name) = extract_mod_name_from_modinfo(&mod_path, locale) {
                 mods.push(ModInfoVO {
                     folder_name,
                     mod_name,
@@ -189,9 +199,10 @@ fn scan_workshop_directory(
     Ok(())
 }
 
-/// 从 modinfo.lua 文件中提取 name 字段
-fn extract_mod_name_from_modinfo(mod_path: &PathBuf) -> Option<String> {
-    let modinfo_path = mod_path.join("modinfo.lua");
+/// 从 modinfo.lua 文件中提取 name 字段（通过执行 Lua 脚本）
+fn extract_mod_name_from_modinfo(mod_path: &PathBuf, locale: &str) -> Option<String> {
+    let cc = AppCoreUtil::get_component::<ConstantComponent>().ok()?;
+    let modinfo_path = mod_path.join(&cc.modinfo_file_name);
 
     if !modinfo_path.exists() {
         return None;
@@ -201,7 +212,7 @@ fn extract_mod_name_from_modinfo(mod_path: &PathBuf) -> Option<String> {
     let bytes = match fs::read(&modinfo_path) {
         Ok(b) => b,
         Err(e) => {
-            error!("读取 modinfo.lua 失败: {}", e);
+            error!("读取 {} 失败: {}", cc.modinfo_file_name, e);
             return None;
         }
     };
@@ -209,45 +220,84 @@ fn extract_mod_name_from_modinfo(mod_path: &PathBuf) -> Option<String> {
     // 尝试多种编码解析文件内容
     let content = decode_file_content(&bytes);
 
-    // 优先匹配 xxx and "..." or "..." 格式（xxx可以是L、CH等任意标识符），提取 or 后面的部分
-    let complex_re =
-        Regex::new(r#"name\s*=\s*\w+\s+and\s+["'][^"']*["']\s+or\s+["']([^"']+)["']"#).ok()?;
-    if let Some(caps) = complex_re.captures(&content) {
-        if let Some(m) = caps.get(1) {
-            let result = m.as_str().to_string();
-            return Some(result);
+    // 使用 Lua 解释器执行脚本并提取 name 值
+    match extract_name_via_lua(&content, &modinfo_path, locale) {
+        Some(name) => Some(name),
+        None => {
+            error!(
+                "无法从 {} 中提取 name 字段: {}",
+                cc.modinfo_file_name,
+                modinfo_path.display()
+            );
+            None
         }
     }
-
-    // 如果不是复杂格式，使用原有的简单匹配 name = "XXX" 或 name='XXX'
-    let simple_re = Regex::new(r#"name\s*=\s*["']([^"']+)["']"#).ok()?;
-    if let Some(caps) = simple_re.captures(&content) {
-        if let Some(m) = caps.get(1) {
-            let result = m.as_str().to_string();
-            return Some(result);
-        }
-    }
-
-    None
 }
 
-/// 尝试多种编码解析文件内容
-fn decode_file_content(bytes: &[u8]) -> String {
-    // 尝试的编码列表：UTF-8, GBK(Windows简体中文), GB18030, Latin1
-    let encodings = [
-        encoding_rs::UTF_8,
-        encoding_rs::GBK,
-        encoding_rs::GB18030,
-        encoding_rs::WINDOWS_1252, // Latin1/Windows西欧
-    ];
+/// 使用 Lua 解释器执行 modinfo.lua 脚本，从中提取 name 全局变量的值
+/// 模拟 DST 游戏环境：设置 locale 全局变量（DST 加载 modinfo.lua 前会预置此变量）
+/// 模组脚本内部根据 locale 自行推导语言（如 L / CH / lang 等），无需我们逐一伪造
+fn extract_name_via_lua(content: &str, modinfo_path: &std::path::Path, locale: &str) -> Option<String> {
+    let lua = Lua::new();
+    let cc = AppCoreUtil::get_component::<ConstantComponent>().ok()?;
 
-    for encoding in &encodings {
-        let (cow, _, had_errors) = encoding.decode(bytes);
-        if !had_errors {
-            return cow.into_owned();
-        }
+    // 模拟 DST 环境：设置 locale 全局变量，让 Lua 脚本内部自行推导语言
+    // DST 真实机制：游戏引擎先设好 locale，modinfo.lua 据此判断 L/CH/lang 等
+    let globals = lua.globals();
+    if let Err(e) = globals.set("locale", locale) {
+        error!("设置 Lua 全局变量 locale 失败: {}", e);
     }
 
-    // 如果所有编码都失败，使用 UTF-8 lossy 解码（替换非法字符为 �）
-    String::from_utf8_lossy(bytes).into_owned()
+    // 执行 Lua 脚本
+    if let Err(e) = lua.load(content).set_name(
+        modinfo_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&cc.modinfo_file_name),
+    ).exec() {
+        error!("执行 {} 脚本失败: {}", cc.modinfo_file_name, e);
+        return None;
+    }
+
+    // 从全局变量中提取 name 值
+    let name_value: Value = match globals.get("name") {
+        Ok(v) => v,
+        Err(e) => {
+            error!("读取 Lua 全局变量 name 失败: {}", e);
+            return None;
+        }
+    };
+
+    match name_value {
+        Value::String(s) => {
+            match s.to_str() {
+                Ok(rs) => {
+                    let result = rs.to_string();
+                    if result.is_empty() {
+                        None
+                    } else {
+                        Some(result)
+                    }
+                }
+                Err(e) => {
+                    error!("Lua 字符串转换失败: {}", e);
+                    None
+                }
+            }
+        }
+        Value::Nil => {
+            error!("{} 中 name 字段为 nil", cc.modinfo_file_name);
+            None
+        }
+        // 如果 name 是其他类型（如数字），尝试转为字符串
+        other => {
+            // mlua Value 的 to_string 返回 Result，出错时返回 None
+            let result = format!("{}", other.to_string().unwrap_or_default());
+            if result.is_empty() {
+                None
+            } else {
+                Some(result)
+            }
+        }
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "dst-archive-manager"
-version = "0.1.0"
+version = "0.2.0"
 description = "饥荒本地存档转专用服务器存档管理器"
 authors = ["ruofeng"]
 edition = "2024"
@@ -27,6 +27,7 @@ dirs = "6.0.0"    # 获取系统标准路径
 winreg = "0.55.0" # 读取注册表
 regex = "1"   # 正则表达式处理
 encoding_rs = "0.8.35"  # 处理非UTF-8编码
+mlua = { version = "0.10", features = ["lua54", "vendored"] }  # Lua 脚本解析
 rust-ini = "0.21.3"    # INI文件解析
 sea-orm = { version = "1.1.19", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Threading"] }
