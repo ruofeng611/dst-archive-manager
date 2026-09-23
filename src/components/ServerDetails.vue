@@ -15,15 +15,25 @@
           </span>
         </h2>
       </div>
-      <button
-          @click="toggleStatus"
-          :disabled="server.status === 'starting'"
-          class="flex items-center gap-2 px-4 py-2 rounded-md font-medium text-white transition-all shadow-sm disabled:opacity-50 disabled:cursor-wait"
-          :class="(server.status === 'running' || server.status === 'stopping') ? 'bg-red-500 hover:bg-red-600' : 'bg-green-600 hover:bg-green-700'"
-      >
-        <component :is="(server.status === 'running' || server.status === 'stopping') ? Square : Play" :size="18" fill="currentColor"/>
-        {{ (server.status === 'running' || server.status === 'stopping') ? t.stop[lang] : t.start[lang] }}
-      </button>
+      <div class="flex items-center gap-2">
+        <button
+            @click="refreshServer"
+            :disabled="isRefreshing"
+            :title="t.refresh[lang]"
+            class="p-2 rounded-md text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-wait transition-colors"
+        >
+          <RefreshCw :size="18" :class="{ 'animate-spin': isRefreshing }"/>
+        </button>
+        <button
+            @click="toggleStatus"
+            :disabled="server.status === 'starting'"
+            class="flex items-center gap-2 px-4 py-2 rounded-md font-medium text-white transition-all shadow-sm disabled:opacity-50 disabled:cursor-wait"
+            :class="(server.status === 'running' || server.status === 'stopping') ? 'bg-red-500 hover:bg-red-600' : 'bg-green-600 hover:bg-green-700'"
+        >
+          <component :is="(server.status === 'running' || server.status === 'stopping') ? Square : Play" :size="18" fill="currentColor"/>
+          {{ (server.status === 'running' || server.status === 'stopping') ? t.stop[lang] : t.start[lang] }}
+        </button>
+      </div>
     </div>
 
     <!-- Tabs -->
@@ -100,7 +110,7 @@
             <input
                 :type="showPassword ? 'text' : 'password'"
                 v-model="localConfig.cluster_password"
-                placeholder="Optional"
+                :placeholder="t.noPasswordSet[lang]"
                 class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-600 rounded px-3 py-2 pr-10 text-sm focus:ring-2 focus:ring-blue-500 dark:text-white"
             />
             <button
@@ -113,8 +123,43 @@
           </div>
         </div>
 
+        <div>
+          <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">{{
+              t.serverToken[lang]
+            }}</label>
+          <div class="relative">
+            <input
+                :type="showToken ? 'text' : 'password'"
+                v-model="localConfig.cluster_token"
+                :placeholder="t.placeholderToken[lang]"
+                class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-600 rounded px-3 py-2 pr-10 text-sm focus:ring-2 focus:ring-blue-500 dark:text-white"
+            />
+            <button
+                type="button"
+                @click="showToken = !showToken"
+                class="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+            >
+              <component :is="showToken ? EyeOff : Eye" :size="18"/>
+            </button>
+          </div>
+          <div class="mt-1 flex items-start justify-between gap-2">
+            <p class="text-xs text-gray-400">{{ t.serverTokenHint[lang] }}</p>
+            <button
+                type="button"
+                @click="applyGlobalToken"
+                :disabled="!globalToken || applyingToken"
+                :title="globalToken ? t.useGlobalTokenHint[lang] : t.noGlobalToken[lang]"
+                class="shrink-0 flex items-center gap-1 px-2 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <ArrowDownToLine :size="14"/>
+              {{ t.useGlobalToken[lang] }}
+            </button>
+          </div>
+        </div>
+
         <div class="space-y-3">
-          <label class="flex items-center cursor-pointer">
+          <!-- w-fit：点击范围只覆盖复选框与文字，不撑满整行，避免误触 -->
+          <label class="flex w-fit items-center cursor-pointer">
             <input
                 type="checkbox"
                 v-model="localConfig.pvp"
@@ -123,7 +168,7 @@
             <span class="ml-2 text-sm font-medium text-gray-700 dark:text-gray-300">{{ t.pvpMode[lang] }}</span>
           </label>
 
-          <label class="flex items-center cursor-pointer">
+          <label class="flex w-fit items-center cursor-pointer">
             <input
                 type="checkbox"
                 v-model="localConfig.pause_when_empty"
@@ -193,12 +238,31 @@
 
       <!-- Saves Tab -->
       <div v-else-if="activeTab === 'saves'" class="space-y-2">
-        <div v-if="!server.archive_phase_vo || server.archive_phase_vo.length === 0"
+        <div v-if="saves.length === 0"
              class="text-center py-8 text-gray-500 dark:text-gray-400 italic">
-          No save files found for {{ server.id }}
+          {{ t.noSaves[lang] }}
         </div>
-        <div v-for="(save, index) in server.archive_phase_vo" :key="save.phase_file_name"
-             class="p-3 bg-gray-50 dark:bg-gray-900/50 rounded border border-gray-200 dark:border-gray-700">
+
+        <!-- 不一致存档提示 + 就地清理 -->
+        <div v-if="hasMismatchedSaves"
+             class="flex items-center justify-between gap-2 p-3 rounded border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20">
+          <p class="text-xs text-amber-700 dark:text-amber-400">{{ t.mismatchedSavesHint[lang] }}</p>
+          <button
+              @click="confirmRepairSaves"
+              class="shrink-0 flex items-center gap-1 px-2 py-1 text-xs font-medium text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40 rounded transition-colors"
+              :title="t.repairSaves[lang]"
+          >
+            <Wrench :size="14"/>
+            {{ t.repairSaves[lang] }}
+          </button>
+        </div>
+
+        <div v-for="(save, index) in saves" :key="save.phase_file_name"
+             class="p-3 rounded border"
+             :class="save.mismatched
+               ? 'bg-amber-50/60 dark:bg-amber-900/10 border-amber-300 dark:border-amber-800 opacity-60'
+               : 'bg-gray-50 dark:bg-gray-900/50 border-gray-200 dark:border-gray-700'"
+             :title="save.mismatched ? t.mismatchedSaveTip[lang] : ''">
           <div class="flex items-center justify-between mb-2">
             <div class="flex items-center gap-2">
               <FileDigit :size="16" class="text-blue-600 dark:text-blue-400"/>
@@ -207,6 +271,10 @@
                 <span v-if="index === 0" class="ml-2 text-xs text-green-600 dark:text-green-400 font-semibold">({{
                     t.latest[lang]
                   }})</span>
+                <span v-if="save.mismatched"
+                      class="ml-2 text-xs px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-400 font-semibold">
+                  {{ t.mismatched[lang] }}
+                </span>
               </h4>
             </div>
             <button
@@ -239,7 +307,7 @@
 </template>
 
 <script setup>
-import {ref, computed, watch, reactive, onUnmounted} from 'vue';
+import {ref, computed, watch, reactive} from 'vue';
 import {
   Play,
   Square,
@@ -251,15 +319,23 @@ import {
   EyeOff,
   Trash2,
   Package,
-  RotateCcw
+  RotateCcw,
+  Wrench,
+  ArrowDownToLine,
+  RefreshCw
 } from 'lucide-vue-next';
 import {TRANSLATIONS} from '@/constants';
 import {tauriInvokeUtil} from '@/utils/tauriInvokeUtil.js';
 import {ElMessage, ElMessageBox} from 'element-plus';
 import {useAppStore} from '@/stores/appStore.js';
+import {useSettingsStore} from '@/stores/settingsStore.js';
 
 const props = defineProps({
   server: Object,
+  saves: {
+    type: Array,
+    default: () => []
+  },
   lang: String
 });
 
@@ -269,129 +345,63 @@ const activeTab = ref('config');
 const t = TRANSLATIONS;
 const isSaving = ref(false);
 const showPassword = ref(false);
+const showToken = ref(false);
+const applyingToken = ref(false);
+const isRefreshing = ref(false);
 const isSyncingMods = ref(false);
 
 // 获取 appStore 以访问所有模组信息
 const appStore = useAppStore();
+const settingsStore = useSettingsStore();
 
-// 计算属性：处理存档模组信息，与所有模组融合
+// 配置页里的全局令牌
+const globalToken = computed(() => settingsStore.settings.global_cluster_token || '');
+
+// 存档使用的模组：名称按需向后端解析（带 mtime 缓存），存在性用本地模组 id 判断
 const archiveMods = computed(() => {
   const serverModIds = props.server?.mod_ids || [];
+  const names = appStore.modNames || {};
+  const available = appStore.localModIds || [];
 
-  if (serverModIds.length === 0) {
-    return [];
-  }
-
-  // 获取所有已扫描到的模组
-  const allMods = appStore.mods || [];
-
-  return serverModIds.map(modId => {
-    // 在已扫描的模组中查找
-    // modId 是 workshop-XXX 格式
-    const foundMod = allMods.find(m => {
-      // 如果是纯数字文件夹，补全为 workshop-数字 格式进行比较
-      const normalizedFolderName = /^\d+$/.test(m.folder_name)
-          ? `workshop-${m.folder_name}`
-          : m.folder_name;
-      return normalizedFolderName === modId;
-    });
-
-    if (foundMod) {
-      return {
-        id: modId,
-        name: foundMod.mod_name,
-        exists: true
-      };
-    } else {
-      return {
-        id: modId,
-        name: modId,  // 如果找不到，就用 ID 作为名字
-        exists: false
-      };
-    }
-  });
+  return serverModIds.map(modId => ({
+    id: modId,
+    // 名称未解析出来时退回显示 id
+    name: names[modId] || modId,
+    exists: available.includes(modId),
+  }));
 });
+
+// 切到模组页（或切换服务器/语言）时才解析名称
+watch([() => props.server?.id, activeTab, () => props.lang], () => {
+  if (activeTab.value === 'mods') {
+    appStore.loadModNames(props.server?.mod_ids || []);
+  }
+});
+
+// 是否存在只存在于单侧的存档
+const hasMismatchedSaves = computed(() => (props.saves || []).some(save => save.mismatched));
+
+// 清理不一致存档（会删除文件，先二次确认）
+const confirmRepairSaves = async () => {
+  try {
+    await ElMessageBox.confirm(
+        t.repairSavesConfirm[props.lang],
+        t.warning[props.lang],
+        {
+          confirmButtonText: t.confirm[props.lang],
+          cancelButtonText: t.cancel[props.lang],
+          type: 'warning',
+        }
+    );
+    // appStore 会顺带刷新当前服务器的详情与存档列表
+    await appStore.repairSaves(props.server.id);
+  } catch (error) {
+    // 用户取消
+  }
+};
 
 // 使用 localConfig 来绑定表单，避免直接修改 prop
 const localConfig = reactive({...props.server});
-
-// 定时器相关
-let statusTimer = null;
-let stoppedCount = 0;
-
-// 查询服务器状态
-const queryServerStatus = async () => {
-  if (!props.server || !props.server.id) return;
-
-  try {
-    const res = await tauriInvokeUtil('query_server_status_handler', {serverId: props.server.id}, {showLoading: false});
-    if (res.code === 200 && res.data) {
-      const newStatus = res.data.status;
-
-      if (newStatus === 'stopped') {
-        stoppedCount++;
-        // 首次查到已关闭 → 按钮变为"启动服务器"
-        if (stoppedCount === 1) {
-          emit('update', {...props.server, status: 'stopped'});
-        }
-        // 连续 3 次 stopped → 停止轮询
-        if (stoppedCount >= 3) {
-          stopStatusTimer();
-        }
-      } else {
-        // 查到非 stopped（running）→ 重置计数，状态改回 stopping
-        stoppedCount = 0;
-        if (props.server.status !== 'stopping') {
-          emit('update', {...props.server, status: 'stopping'});
-        }
-      }
-    }
-  } catch (error) {
-    // 静默处理错误，避免频繁弹窗
-    console.error('查询服务器状态失败:', error);
-  }
-};
-
-// 启动定时器
-const startStatusTimer = () => {
-  stoppedCount = 0; // 重置计数
-  if (statusTimer) return; // 已在运行
-  // 立即执行一次
-  queryServerStatus();
-  // 每3秒查询一次
-  statusTimer = setInterval(queryServerStatus, 3000);
-};
-
-// 停止定时器
-const stopStatusTimer = () => {
-  if (statusTimer) {
-    clearInterval(statusTimer);
-    statusTimer = null;
-  }
-};
-
-// 组件卸载时停止定时器
-onUnmounted(() => {
-  stopStatusTimer();
-});
-
-// 当服务器切换时，停止旧定时器；若新服务器状态为 stopping，启动轮询
-watch(() => props.server?.id, (newId, oldId) => {
-  if (newId !== oldId) {
-    stopStatusTimer();
-    // 切换到新服务器后，检查是否需要恢复轮询
-    if (props.server?.status === 'stopping') {
-      startStatusTimer();
-    }
-  }
-});
-
-// 当状态变为 stopping 时，启动轮询确认服务器关闭
-watch(() => props.server?.status, (newStatus) => {
-  if (newStatus === 'stopping') {
-    startStatusTimer();
-  }
-});
 
 // 监听 server prop 变化，重置 localConfig (当切换选中的服务器时)
 watch(() => props.server, (newServer) => {
@@ -421,12 +431,16 @@ const saveConfig = async () => {
         cluster_password: localConfig.cluster_password,
         cluster_description: localConfig.cluster_description,
         cluster_name: localConfig.cluster_name,
+        // 空串表示清除本服务器的覆盖值（回退全局令牌）
+        token: localConfig.cluster_token || '',
       }
     });
 
     if (res.code === 200) {
       ElMessage.success(t.updateConfigSuccess[props.lang]);
-      // 更新父组件的数据
+      // 留空保存时后端会写入全局令牌，因此这里也要按全局值回显
+      const tokenFallback = useSettingsStore().settings.global_cluster_token;
+      // 更新父组件的数据（令牌清空时归一为全局值，与文件内容一致）
       handleUpdate({
         ...props.server,
         max_players: localConfig.max_players,
@@ -435,6 +449,7 @@ const saveConfig = async () => {
         cluster_password: localConfig.cluster_password,
         cluster_description: localConfig.cluster_description,
         cluster_name: localConfig.cluster_name,
+        cluster_token: localConfig.cluster_token || tokenFallback || null,
       });
     } else {
       ElMessage.error(res.message || t.updateConfigFailed[props.lang]);
@@ -447,8 +462,48 @@ const saveConfig = async () => {
   }
 };
 
-const toggleStatus = () => {
-  if (props.server.status === 'running' || props.server.status === 'stopping') {
+// 刷新当前服务器的信息（等同重新点一次这个存档：详情 + 存档列表）
+const refreshServer = async () => {
+  isRefreshing.value = true;
+  try {
+    await Promise.all([
+      appStore.loadServerDetail(props.server.id),
+      appStore.loadServerSaves(props.server.id),
+    ]);
+  } finally {
+    isRefreshing.value = false;
+  }
+};
+
+// 用配置页的全局令牌填入本服务器并写入文件（只提交 token，不动 cluster.ini）
+const applyGlobalToken = async () => {
+  if (!globalToken.value) return;
+
+  applyingToken.value = true;
+  try {
+    const res = await tauriInvokeUtil('update_server_config_handler', {
+      config: {
+        server_id: props.server.id,
+        // 空串表示"用设置页的全局令牌"
+        token: '',
+      }
+    });
+
+    if (res.code === 200) {
+      ElMessage.success(t.useGlobalTokenSuccess[props.lang]);
+      handleUpdate({...props.server, cluster_token: globalToken.value});
+    } else {
+      ElMessage.error(res.message || t.updateConfigFailed[props.lang]);
+    }
+  } catch (error) {
+    console.error('Apply global token failed:', error);
+    ElMessage.error(t.updateConfigFailed[props.lang]);
+  } finally {
+    applyingToken.value = false;
+  }
+};
+
+const toggleStatus = () => {  if (props.server.status === 'running' || props.server.status === 'stopping') {
     // 停止服务器（stopping 状态也可再次点击关闭）
     emit('stop', props.server.id);
   } else {
@@ -530,7 +585,8 @@ const syncMods = async () => {
     const res = await tauriInvokeUtil('sync_client_mods_to_server_handler', {});
     if (res.code === 200) {
       ElMessage.success(t.syncModsSuccess[props.lang]);
-      // 通知父组件重新扫描模组信息
+      // 同步后目录 mtime 变化，重新解析名称；并通知父组件刷新本地模组列表
+      await appStore.loadModNames(props.server?.mod_ids || []);
       emit('syncMods');
     } else {
       ElMessage.error(res.message || t.syncModsFailed[props.lang]);

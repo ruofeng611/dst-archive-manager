@@ -2,16 +2,48 @@ export const TRANSLATIONS = {
     appTitle: {en: 'DST Save Converter', zh: '饥荒存档转换器'},
     settings: {en: 'Settings', zh: '设置'},
     general: {en: 'General', zh: '常规'},
+    back: {en: 'Back', zh: '返回'},
+    rescan: {en: 'Rescan', zh: '重新扫描'},
     serverToken: {en: 'Server Token', zh: '服务器令牌'},
-    localSavePath: {
-        en: 'Local Save Path (Select the folder containing "DoNotStarveTogether")',
-        zh: '本地存档路径（请选择包含 “DoNotStarveTogether” 文件夹的目录）'
+    serverTokenHint: {
+        en: 'Stored in this server\'s cluster_token.txt. Saving with an empty value fills in the global token from Settings.',
+        zh: '保存在该服务器的 cluster_token.txt 中；留空保存时会自动填入设置页的全局令牌。'
     },
-    serverPath: {
-        en: 'Server Program Path (Select the folder containing "Don\'t Starve Together Dedicated Server")',
-        zh: '服务器程序路径（请选择包含 “Don\'t Starve Together Dedicated Server” 文件夹的目录）'
+    useGlobalToken: {en: 'Use Global Token', zh: '设置为全局token'},
+    useGlobalTokenHint: {
+        en: 'Fill in the global token from Settings and save it to this server.',
+        zh: '用设置页的全局令牌填入并保存到该服务器。'
     },
+    useGlobalTokenSuccess: {en: 'Global token applied.', zh: '已应用全局令牌。'},
+    noGlobalToken: {en: 'No global token configured in Settings yet.', zh: '设置页还没有配置全局令牌。'},
     browse: {en: 'Browse', zh: '浏览'},
+    clear: {en: 'Clear', zh: '清除'},
+
+    // 配置页
+    settingsHint: {
+        en: 'Paths are stored in the app database and drive scanning, conversion and server startup.',
+        zh: '路径保存在应用数据库中，扫描、转换与启动服务器都按此配置执行。'
+    },
+    clientInstallPath: {en: 'Client Install Path', zh: '客户端安装目录'},
+    serverInstallPath: {en: 'Server Install Path', zh: '服务端安装目录'},
+    workshopPath: {en: 'Workshop Content Path', zh: '创意工坊目录'},
+    archiveRootPath: {en: 'Save Root Path', zh: '存档根目录'},
+    globalToken: {en: 'Global Server Token', zh: '全局服务器令牌'},
+    globalTokenHint: {
+        en: 'Used when converting to a server and applied to all servers by default; per-server settings override it.',
+        zh: '转为服务器时使用，并作为所有服务器的默认值；单个服务器的配置会覆盖它。'
+    },
+    saveSettingsSuccess: {en: 'Settings saved!', zh: '配置已保存！'},
+    saveSettingsFailed: {en: 'Failed to save settings', zh: '配置保存失败'},
+    browseFailed: {en: 'Failed to open folder dialog.', zh: '打开文件夹选择框失败。'},
+    discoverPaths: {en: 'Auto-detect', zh: '自动扫描'},
+    discoverPathsHint: {
+        en: 'Detect Steam install paths from the registry and the save root from Documents.',
+        zh: '从注册表检测 Steam 安装目录，并从“文档”检测存档根目录。'
+    },
+    discoverSuccess: {en: 'Detected paths were filled in and saved.', zh: '已自动填入并保存检测到的目录。'},
+    discoverNothingFound: {en: 'No DST directories detected. Please select them manually.', zh: '未检测到任何 DST 目录，请手动选择。'},
+    discoverFailed: {en: 'Auto-detect failed.', zh: '自动扫描失败。'},
     localSaves: {en: 'Local Saves (Clusters)', zh: '本地存档 (Clusters)'},
     serverList: {en: 'Dedicated Servers', zh: '专用服务器列表'},
     convert: {en: 'Convert to Server', zh: '转为服务器'},
@@ -27,6 +59,10 @@ export const TRANSLATIONS = {
     serverName: {en: 'Server Name', zh: '服务器名称'},
     maxPlayers: {en: 'Max Players', zh: '最大人数'},
     password: {en: 'Password', zh: '密码'},
+    noPasswordSet: {en: 'No password set', zh: '未设置密码'},
+    toggleTheme: {en: 'Toggle Theme', zh: '切换主题'},
+    switchToChinese: {en: 'Switch to Chinese', zh: '切换到中文'},
+    switchToEnglish: {en: 'Switch to English', zh: '切换到英文'},
     gameMode: {en: 'Game Mode', zh: '游戏模式'},
     save: {en: 'Save', zh: '保存'},
     running: {en: 'Running', zh: '运行中'},
@@ -42,18 +78,13 @@ export const TRANSLATIONS = {
     confirmDelete: {en: 'Are you sure you want to delete this server?', zh: '确定要删除该服务器吗？'},
 
     dst_mod_scan_warn_message: {
-        en: "Current folder does not contain any mod information. Please try another path.",
-        zh: "当前文件夹下未找到相关的模组信息，请换个路径试试。"
+        en: "Server install path is not configured or invalid. Please set it in Settings.",
+        zh: "未配置服务端安装目录或路径无效，请到设置页配置。"
     },
     dst_archive_scan_warn_message: {
-        en: "Current folder does not contain any archive information. Please try another path.",
-        zh: "当前文件夹下未找到相关的存档信息，请换个路径试试。"
+        en: "Save root path is not configured or invalid. Please set it in Settings.",
+        zh: "未配置存档根目录或路径无效，请到设置页配置。"
     },
-    dst_scan_prompt_message: {
-        en: "Searching...",
-        zh: "正在为您自动搜索..."
-    },
-
     file_select_message: {
         en: "Please select a folder",
         zh: "请选择文件夹"
@@ -103,6 +134,14 @@ export const TRANSLATIONS = {
     startFailed: {en: 'Failed to start server', zh: '服务器启动失败'},
     stopSuccess: {en: 'Server stopped successfully!', zh: '服务器已停止！'},
     stopFailed: {en: 'Failed to stop server', zh: '服务器停止失败'},
+    peerCrashedMessage: {
+        en: 'One shard crashed; the other one was shut down.',
+        zh: '检测到分片崩档，已关闭对端服务器。'
+    },
+    startupFailedMessage: {
+        en: 'Server did not come up as expected; the started shard was shut down.',
+        zh: '服务器未按期启动完成，已关闭已启动的分片。'
+    },
     updateConfigSuccess: {en: 'Configuration updated successfully!', zh: '配置更新成功！'},
     updateConfigFailed: {en: 'Failed to update configuration', zh: '配置更新失败'},
 
@@ -126,12 +165,40 @@ export const TRANSLATIONS = {
     modMissing: {en: 'Missing', zh: '缺失'},
     archiveMods: {en: 'Archive Mods', zh: '存档模组'},
 
-    // 缺失模组提示
+    // 缺失模组提示（只警告不拦截，用户可选择继续启动）
     missingModsTitle: {en: 'Missing Mods', zh: '模组缺失'},
     missingModsMessage: {
-        en: 'Missing mods detected. Please download them from Steam first, then click the "Sync Mods" button to sync.',
-        zh: '缺失模组，请先前往Steam下载之后再按同步模组按钮同步'
+        en: 'Some required mods are not ready (missing: {count}; download them in Steam first, then use "Sync Mods"). Start anyway?',
+        zh: '服务器所需模组未全部就绪（缺失 {count} 个；请先在 Steam 下载，再到模组页点「同步模组」）。仍要启动吗？'
     },
+    mismatchedSavesOnStartMessage: {
+        en: '{count} of the saves exist on only one shard (Master or Caves) and cannot be loaded. Start anyway?',
+        zh: '存在 {count} 个只在地面或洞穴单侧的存档，这类存档无法加载。仍要启动吗？'
+    },
+    continueStart: {en: 'Start Anyway', zh: '仍要启动'},
+    gotIt: {en: 'Got it', zh: '知道了'},
+    refresh: {en: 'Refresh', zh: '刷新'},
     confirm: {en: 'OK', zh: '确定'},
     openInFolder: {en: 'Open in Folder', zh: '在文件夹中打开'},
+
+    // 列表空状态
+    noClusters: {en: 'No local saves found. Check path settings.', zh: '未找到本地存档，请检查路径配置。'},
+    noSaves: {en: 'No save files found.', zh: '未找到存档文件。'},
+
+    // 清理不一致存档
+    repairSaves: {en: 'Clean Mismatched Saves', zh: '清理不一致存档'},
+    repairSavesConfirm: {
+        en: 'Delete saves that exist on only one shard (Master or Caves)? These saves cannot be loaded.',
+        zh: '将删除只存在于地面或洞穴单侧的存档（这类存档无法加载），确定继续吗？'
+    },
+    repairSavesSuccess: {en: 'Mismatched saves cleaned!', zh: '不一致存档已清理！'},
+    mismatched: {en: 'Mismatched', zh: '不一致'},
+    mismatchedSavesHint: {
+        en: 'Greyed-out saves exist on only one shard and cannot be loaded.',
+        zh: '标灰的存档只存在于地面或洞穴单侧，无法加载。'
+    },
+    mismatchedSaveTip: {
+        en: 'This save exists on only one shard (Master or Caves).',
+        zh: '该存档只存在于地面或洞穴单侧。'
+    },
 };

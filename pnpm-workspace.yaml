@@ -1,0 +1,6 @@
+# pnpm v11 起，依赖构建脚本的放行配置只在这里生效（package.json 的 pnpm 字段已被忽略）。
+# 这两个包的 postinstall 是常规行为：esbuild 安装本机二进制（vite 依赖它），
+# vue-demi 按 Vue 版本切换其 shim。
+allowBuilds:
+  esbuild: true
+  vue-demi: true

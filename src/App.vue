@@ -17,8 +17,9 @@
 </template>
 
 <script setup>
-import {computed} from 'vue'
+import {computed, onMounted, onUnmounted} from 'vue'
 import {useSettingsStore} from '@/stores/settingsStore.js'
+import {useAppStore} from '@/stores/appStore.js'
 
 // Element Plus 语言包
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
@@ -28,6 +29,26 @@ import en from 'element-plus/es/locale/lang/en'
 import 'element-plus/theme-chalk/dark/css-vars.css'
 
 const settingsStore = useSettingsStore()
+const appStore = useAppStore()
+
+let unlistenStatus = null
+
+// 语言与配置是会话级数据，在这里读一次即可：
+// 各页面的后端接口都直接从数据库读配置，不依赖前端镜像，所以无需每次进页面重查。
+onMounted(async () => {
+  await settingsStore.loadLanguage()
+  await settingsStore.loadSettings()
+
+  // 服务器状态由后端崩档监视推送事件，前端不轮询
+  unlistenStatus = await appStore.initStatusEvents()
+})
+
+onUnmounted(() => {
+  if (unlistenStatus) {
+    unlistenStatus()
+    unlistenStatus = null
+  }
+})
 
 // 计算属性：将 store 中的字符串语言代码映射为 Element Plus 的对象
 const locale = computed(() => {

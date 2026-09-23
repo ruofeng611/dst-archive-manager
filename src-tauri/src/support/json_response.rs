@@ -5,8 +5,36 @@
 use crate::SimpleAppWebError;
 use serde::Serialize;
 use serde_json::Value;
-use simple_starter_core::AppCoreUtil;
+use simple_starter_core::{app_config, get_config_value_by_path};
 use simple_starter_core::tracing::{error, warn};
+use std::sync::OnceLock;
+
+/// 服务名称缓存：应用启动阶段经 [`init_service_name`] 写入一次，
+/// 此后所有响应零锁、零配置查找读取（仅克隆一次缓存值）。
+static SERVICE_NAME: OnceLock<Option<String>> = OnceLock::new();
+
+/// 初始化服务名称缓存（须在配置快照就绪后的启动阶段调用一次）
+///
+/// 重复调用不覆盖首个值，仅告警。
+pub fn init_service_name() {
+    let service_name = app_config().and_then(|config| {
+        get_config_value_by_path(&config, "app.name")
+            .and_then(|value| value.as_str().map(str::to_string))
+    });
+    if SERVICE_NAME.set(service_name).is_err() {
+        warn!("Service name already initialized, skip re-initialization");
+    }
+}
+
+/// 读取服务名称缓存（返回克隆，调用方可直接放入响应体）
+///
+/// 未经 [`init_service_name`] 初始化即读取属编程错误，fail-fast。
+fn service_name() -> Option<String> {
+    SERVICE_NAME
+        .get()
+        .expect("service name must be initialized during application startup")
+        .clone()
+}
 
 /// 标准化 Web API 响应结构
 ///
@@ -82,7 +110,8 @@ macro_rules! json_response_wrap_impl {
 ///    - 直接使用 `err` 自身携带的 `code` 和 `message`。
 ///    - 从 `err` 中提取附加的错误数据（如果有）。
 /// 3. **通用字段**:
-///    - `service_name` 和 `function_name` (如果存在) 会被填充到响应中。
+///    - `service_name` 取启动时缓存的全局值（见 [`init_service_name`]），
+///      克隆后填充；`function_name` (如果存在) 会被填充到响应中。
 pub fn process_data<T, S>(
     code: i32,
     message: S,
@@ -93,11 +122,8 @@ where
     T: Serialize,
     S: Into<String>,
 {
-    // 尝试获取服务名称配置
-    let service_name: Option<String> = match AppCoreUtil::get_config_value_by_path("app.name") {
-        Some(value) => value.as_str().map(|s| s.to_string()),
-        None => None,
-    };
+    // 读取启动时缓存的服务名称
+    let service_name = service_name();
 
     match result {
         // 业务逻辑执行成功

@@ -2,20 +2,29 @@
   <div
       class="flex flex-col h-screen bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100 transition-colors duration-200">
 
-    <!-- --- Top Bar: Global Settings & Paths --- -->
+    <!-- --- Top Bar: Global Actions --- -->
     <header class="bg-white dark:bg-gray-800 shadow-sm border-b border-gray-200 dark:border-gray-700 z-10">
       <div class="max-w-7xl mx-auto px-4 py-3">
-        <div class="flex justify-between items-center mb-4">
+        <div class="flex justify-between items-center">
           <h1 class="text-xl font-bold flex items-center gap-2 text-orange-600 dark:text-orange-500">
             <HardDrive/>
             {{ t.appTitle[lang] }}
           </h1>
           <div class="flex items-center gap-2">
+            <!-- Rescan：按配置页的路径重新扫描，未配置时自动发现 -->
+            <button
+                @click="rescanAll"
+                :disabled="isScanning"
+                class="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              <RefreshCw :class="{ 'animate-spin': isScanning }" :size="18"/>
+              {{ t.rescan[lang] }}
+            </button>
             <!-- Language Toggle -->
             <button
                 @click="toggleLanguage"
                 class="p-2 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors text-gray-700 dark:text-gray-200"
-                :title="lang === 'en' ? 'Switch to Chinese' : 'Switch to English'"
+                :title="lang === 'en' ? t.switchToChinese[lang] : t.switchToEnglish[lang]"
             >
               <div class="flex items-center gap-2">
                 <Languages :size="20"/>
@@ -26,56 +35,18 @@
             <button
                 @click="settingsStore.toggleTheme()"
                 class="p-2 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors text-gray-700 dark:text-gray-200"
-                title="Toggle Theme"
+                :title="t.toggleTheme[lang]"
             >
               <component :is="settingsStore.isDark ? Moon : Sun" :size="20"/>
             </button>
-          </div>
-        </div>
-
-        <div class="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
-          <div class="md:col-span-3">
-            <label class="text-xs font-semibold text-gray-500 dark:text-gray-400 tracking-wider mb-1 block">
-              {{ t.serverToken[lang] }}
-            </label>
-            <div
-                class="flex items-center bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-md px-3 py-2 focus-within:ring-2 focus-within:ring-blue-500">
-              <Key :size="16" class="text-gray-400 mr-2"/>
-              <input
-                  type="password"
-                  v-model="appStore.appInfo.serverToken"
-                  :placeholder="t.placeholderToken[lang]"
-                  class="bg-transparent border-none outline-none text-sm w-full text-gray-900 dark:text-gray-100 placeholder-gray-400"
-              />
-            </div>
-          </div>
-
-          <div class="md:col-span-4">
-            <PathSelector
-                :label="t.localSavePath[lang]"
-                v-model="appStore.appInfo.localSavePath"
-                :placeholder="t.file_select_message[lang]"
-                @search="scanArchives"
-                @reset="defaultScanArchives"
-                :maxLength="6"
-            />
-          </div>
-
-          <div class="md:col-span-4">
-            <PathSelector
-                :label="t.serverPath[lang]"
-                v-model="appStore.appInfo.serverInstallPath"
-                :placeholder="t.file_select_message[lang]"
-                @search="scanMods"
-                @reset="defaultScanMods"
-                :maxLength="7"
-            />
-          </div>
-
-          <div class="md:col-span-1 flex justify-center pb-0.5">
-            <div class="p-2 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-400">
+            <!-- Settings -->
+            <button
+                @click="openSettings"
+                class="p-2 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors text-gray-700 dark:text-gray-200"
+                :title="t.settings[lang]"
+            >
               <Settings :size="20"/>
-            </div>
+            </button>
           </div>
         </div>
       </div>
@@ -112,13 +83,13 @@
           </div>
           <div class="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
           <div v-if="appStore.clusters.length === 0" class="text-center py-10 text-gray-400 text-sm">
-            No clusters found.<br/>Check path settings.
+            {{ t.noClusters[lang] }}
           </div>
           <div
               v-for="cluster in appStore.clusters"
               :key="cluster.id"
               @click="appStore.changeSelectedCluster(cluster.id)"
-                            @contextmenu.prevent="showContextMenu($event, cluster.id)"
+                            @contextmenu.prevent="showContextMenu($event, cluster.id, false)"
               class="p-3 rounded-md cursor-pointer transition-all border"
               :class="appStore.selectedClusterId === cluster.id
               ? 'bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-700 ring-1 ring-blue-400'
@@ -136,13 +107,13 @@
                   {{ cluster.cluster_name || cluster.id }}
                 </p>
                 <p class="text-xs text-gray-500 truncate font-mono">{{ cluster.id }}</p>
-                <div v-if="cluster.archive_phase_vo && cluster.archive_phase_vo.length > 0"
+                <div v-if="cluster.latest_phase"
                      class="text-[10px] text-gray-400 mt-0.5 flex items-center gap-2">
-                  <span>{{ t.day[lang] }} {{ cluster.archive_phase_vo[0].cycles }}</span>
+                  <span>{{ t.day[lang] }} {{ cluster.latest_phase.cycles }}</span>
                   <span>•</span>
-                  <span>{{ getSeasonText(cluster.archive_phase_vo[0].season) }}</span>
+                  <span>{{ getSeasonText(cluster.latest_phase.season) }}</span>
                   <span>•</span>
-                  <span>{{ getPhaseText(cluster.archive_phase_vo[0].now_phase) }}</span>
+                  <span>{{ getPhaseText(cluster.latest_phase.now_phase) }}</span>
                 </div>
               </div>
             </div>
@@ -168,7 +139,7 @@
                 v-for="server in appStore.servers"
                 :key="server.id"
                 @click="appStore.changeSelectedServer(server.id)"
-                                @contextmenu.prevent="showContextMenu($event, server.id)"
+                                @contextmenu.prevent="showContextMenu($event, server.id, true)"
                 class="p-3 rounded-md cursor-pointer transition-all border group"
                 :class="appStore.selectedServerId === server.id
                 ? 'bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-700 ring-1 ring-blue-400'
@@ -219,8 +190,9 @@
       <!-- Right Col: Server Details -->
       <div class="col-span-6 min-h-0">
         <ServerDetails
-            v-if="selectedServer"
-            :server="selectedServer"
+            v-if="appStore.serverDetail"
+            :server="appStore.serverDetail"
+            :saves="appStore.serverSaves"
             :lang="lang"
             @update="appStore.updateServer"
             @stop="appStore.stopServer"
@@ -258,52 +230,58 @@
         <FolderOpen :size="16"/>
         <span>{{ t.openInFolder[lang] }}</span>
       </div>
+      <div
+          v-if="contextMenu.isServer"
+          @click="confirmRepairSaves"
+          class="flex items-center gap-2 px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer transition-colors"
+      >
+        <Wrench :size="16"/>
+        <span>{{ t.repairSaves[lang] }}</span>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
 import {computed, onMounted, ref} from 'vue';
+import {useRouter} from 'vue-router';
 import {
-  Settings, RefreshCw, Key, HardDrive, Server, FileDigit,
-  ArrowRight, ArrowLeft, Trash2, Languages, Moon, Sun, FolderOpen
+  Settings, RefreshCw, HardDrive, Server, FileDigit,
+  ArrowRight, ArrowLeft, Trash2, Languages, Moon, Sun, FolderOpen, Wrench
 } from 'lucide-vue-next';
 import {TRANSLATIONS} from '@/constants';
 import {useSettingsStore} from '@/stores/settingsStore';
 import {useAppStore} from '@/stores/appStore';
 
-import PathSelector from '@/components/PathSelector.vue';
 import ServerDetails from '@/components/ServerDetails.vue';
-import {ElMessage, ElMessageBox} from "element-plus";
+import {ElMessageBox} from "element-plus";
 import {tauriInvokeUtil} from "@/utils/tauriInvokeUtil.js";
-import {delay} from "@/utils/timeUtil.js";
 
+const router = useRouter();
 const settingsStore = useSettingsStore();
 const appStore = useAppStore();
 
 const t = TRANSLATIONS;
 // 简单的 lang 快捷访问
 const lang = computed(() => settingsStore.language);
-
-// 查找当前选中的 Server 对象
-const selectedServer = computed(() =>
-    appStore.servers.find(s => s.id === appStore.selectedServerId)
-);
+const isScanning = ref(false);
 
 // --- 右键菜单 ---
 const contextMenu = ref({
   visible: false,
   x: 0,
   y: 0,
-  archiveId: null
+  archiveId: null,
+  isServer: false
 });
 
-const showContextMenu = (event, archiveId) => {
+const showContextMenu = (event, archiveId, isServer) => {
   contextMenu.value = {
     visible: true,
     x: event.clientX,
     y: event.clientY,
-    archiveId
+    archiveId,
+    isServer
   };
 };
 
@@ -318,23 +296,22 @@ const openInFolder = async () => {
   await tauriInvokeUtil('open_archive_in_folder_handler', { id }, { showLoading: false });
 };
 
-// 初始化加载
+// 初始化加载：语言与配置在 App.vue 里已读过一次，这里只查数据
 onMounted(async () => {
-  // 先加载后端语言设置
-  await settingsStore.loadLanguage();
-  // 再扫描数据（此时 locale 已就绪，模组名会根据语言正确显示）
-  await scanMods();
-  await scanArchives();
+  await rescanAll();
 });
 
-// 切换语言：保存到后端并重新查询数据（使模组名按新语言显示）
+// 打开配置页
+const openSettings = () => {
+  router.push('/settings');
+};
+
+// 切换语言：只需保存到后端。界面文案是前端响应式的，后端唯一依赖 locale 的是模组名，
+// 而模组名在切到「模组」页时会按当前语言重新解析（缓存按 locale 区分），无需重扫全量数据。
 const toggleLanguage = async () => {
   const newLang = settingsStore.language === 'en' ? 'zh' : 'en';
   settingsStore.language = newLang;
   await settingsStore.saveLanguage(newLang);
-  // 切换语言后重新扫描，模组名会按新 locale 重新解析
-  await scanMods();
-  await scanArchives();
 };
 
 // 删除确认
@@ -373,84 +350,49 @@ const getPhaseText = (phase) => {
 };
 
 
-// 调用模组扫描（可以传入自定义路径，或者传 null）
-const invokeScanMods = async (customPath) => {
-  const res = await tauriInvokeUtil('scan_dst_mods_handler', {customPath: customPath}, {showLoading: false});
-  if (res.code === 200) {
-    if (res.data.found) {
-      // 新的数据结构: mods 是 [{ folder_name, mod_name }] 数组
-      appStore.mods = res.data.mods || [];
-      appStore.appInfo.serverInstallPath = res.data.server_path;
-    } else {
-      ElMessage.warning(t.dst_mod_scan_warn_message[settingsStore.language]);
-      appStore.appInfo.serverInstallPath = '';
-      appStore.mods = [];
-    }
+// 按配置页的路径重新扫描
+const rescanAll = async () => {
+  isScanning.value = true;
+  try {
+    await appStore.loadMods();
+    await appStore.loadClusters();
+    await appStore.loadServers();
+  } finally {
+    isScanning.value = false;
   }
 };
 
-// 调用存档扫描（可以传入自定义路径，或者传 null）
-const invokeScanArchives = async (customPath) => {
-  const res = await tauriInvokeUtil('scan_dst_archives_handler', {customPath: customPath}, {showLoading: false});
-  if (res.code === 200) {
-    if (res.data.found) {
-      appStore.clusters = res.data.clusters;
-      appStore.servers = res.data.servers;
-      appStore.appInfo.localSavePath = res.data.path;
-    } else {
-      ElMessage.warning(t.dst_archive_scan_warn_message[settingsStore.language]);
-      appStore.appInfo.localSavePath = '';
-      appStore.clusters = res.data.clusters;
-      appStore.servers = res.data.servers;
-    }
-  }
-}
-
-
-const scanArchives = async () => {
-  if (appStore.appInfo.localSavePath === '') {
-    ElMessage.warning(t.file_select_message[settingsStore.language]);
-    return;
-  }
-  await invokeScanArchives(appStore.appInfo.localSavePath);
-};
-
-const defaultScanArchives = async () => {
-  appStore.appInfo.localSavePath = '';
-
-  await delay(500);
-  appStore.appInfo.localSavePath = t.dst_scan_prompt_message[settingsStore.language];
-
-  await delay(500)
-  await invokeScanArchives(null)
-}
-
-const scanMods = async () => {
-  if (appStore.appInfo.serverInstallPath === '') {
-    ElMessage.warning(t.file_select_message[settingsStore.language]);
-    return;
-  }
-  await invokeScanMods(appStore.appInfo.serverInstallPath);
-};
-
-const defaultScanMods = async () => {
-  appStore.appInfo.serverInstallPath = '';
-
-  await delay(500);
-  appStore.appInfo.serverInstallPath = t.dst_scan_prompt_message[settingsStore.language];
-
-  await delay(500)
-  await invokeScanMods(null)
-};
-
-// 刷新服务器详情（删除存档后重新扫描）
+// 刷新服务器详情与存档列表（删除存档后重新拉取）
 const refreshServerDetails = async () => {
-  await invokeScanArchives(appStore.appInfo.localSavePath || null);
+  const id = appStore.selectedServerId;
+  if (!id) return;
+  await Promise.all([appStore.loadServerDetail(id), appStore.loadServerSaves(id)]);
 };
 
 // 处理同步模组后的刷新
 const handleSyncMods = async () => {
-  // 重新扫描模组以获取最新状态
-  await invokeScanMods(appStore.appInfo.serverInstallPath || null);
+  await appStore.loadMods();
+};
+
+// 清理不一致存档（会删除文件，先二次确认）
+const confirmRepairSaves = async () => {
+  const id = contextMenu.value.archiveId;
+  if (!id) return;
+  closeContextMenu();
+
+  try {
+    await ElMessageBox.confirm(
+        t.repairSavesConfirm[lang.value],
+        t.warning[lang.value],
+        {
+          confirmButtonText: t.confirm[lang.value],
+          cancelButtonText: t.cancel[lang.value],
+          type: 'warning',
+        }
+    );
+    await appStore.repairSaves(id);
+  } catch (error) {
+    // 用户取消
+  }
 };
 </script>

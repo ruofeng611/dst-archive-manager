@@ -27,9 +27,7 @@ for (const path in iconModules) {
 import {createPinia} from "pinia";
 
 const pinia = createPinia()
-import piniaPluginPersistedstate from 'pinia-plugin-persistedstate'
 
-pinia.use(piniaPluginPersistedstate)
 app.use(pinia)
 
 import router from './router'

@@ -1,73 +1,69 @@
 use crate::service::{
-    ArchivePathService, KEY_APP_LANGUAGE, KEY_DST_ARCHIVE_DIR, KEY_DST_CLIENT_PATH, KEY_DST_SERVER_PATH,
-    KEY_STEAM_WORKSHOP_PATH, KEY_DST_USER_DIR,
+    STATUS_STARTING, STATUS_STOPPING, ServerRuntimeService, SettingService,
 };
 use crate::support::JsonResponse;
-use crate::utils::find_window_by_title;
+use crate::utils::{find_and_send_shutdown_command, find_window_by_title};
+use crate::utils::{read_token, write_token};
 use crate::{ConstantComponent, SimpleAppWebError, json_response_wrap};
 use serde::Deserialize;
-use simple_starter_core::AppCoreUtil;
+use crate::utils::app_component;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{fs, thread};
+use std::fs;
 use tauri_macros::auto_command;
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-    SendInput, VIRTUAL_KEY, VK_RETURN,
-};
-use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow, IsIconic, ShowWindow, SW_RESTORE};
-use windows::core::{HSTRING, PCWSTR};
 
 #[derive(Deserialize)]
 pub struct ConvertClusterRequest {
     pub cluster_id: String,
-    pub token: String,
     pub has_caves: bool, // 是否有洞穴
 }
 
 /// 将 Cluster 转换为 Server
+///
+/// token 取配置页的全局令牌，只写入 `cluster_token.txt`；**不**为该服务器创建覆盖值
+/// （覆盖值只由用户在服务器配置里显式填写才产生，留空即回退全局）。
 #[auto_command]
 pub async fn convert_cluster_to_server_handler(request: ConvertClusterRequest) -> JsonResponse {
     json_response_wrap!(function_name = "转换为服务器", {
-        let constant_component: Arc<ConstantComponent> = AppCoreUtil::get_component()?;
-        let archive_path_service: Arc<ArchivePathService> = AppCoreUtil::get_component()?;
+        let constant_component: Arc<ConstantComponent> = app_component()?;
+        let setting_service: Arc<SettingService> = app_component()?;
 
-        // 1. 获取 Cluster 的完整路径
-        let cluster_path = archive_path_service
-            .get_path_by_id(&request.cluster_id)
-            .await?
-            .ok_or_else(|| {
-                SimpleAppWebError::new(
-                    404,
-                    format!("Cluster path not found: {}", request.cluster_id),
-                )
-            })?;
-
-        let cluster_path_buf = PathBuf::from(&cluster_path);
+        // 1. 推导 Cluster 的完整路径
+        let cluster_path_buf = setting_service
+            .resolve_archive_path(&request.cluster_id)
+            .await?;
 
         // 验证路径存在
         if !cluster_path_buf.exists() {
             return Err(SimpleAppWebError::new(
                 404,
-                format!("Cluster path does not exist: {}", cluster_path),
+                format!("Cluster path does not exist: {}", cluster_path_buf.display()),
             ));
         }
 
-        // 2. 从 key-value 表获取 DoNotStarveTogether 存档根目录（扫描时已存储）
-        let dst_dir_str = archive_path_service
-            .get_value(KEY_DST_ARCHIVE_DIR)
-            .await?
+        // 2. 读取配置（根目录、全局令牌、服务端目录一次读齐）
+        let setting = setting_service.get().await?;
+
+        let dst_dir_str = setting.archive_root.as_deref().ok_or_else(|| {
+            SimpleAppWebError::new(400, "未配置存档根目录：请在设置页配置".to_string())
+        })?;
+        let dst_dir = PathBuf::from(dst_dir_str);
+
+        let token = setting
+            .global_cluster_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
             .ok_or_else(|| {
-                SimpleAppWebError::new(
-                    500,
-                    "DST archive directory not found. Please scan archives first.".to_string(),
-                )
+                SimpleAppWebError::new(400, "未配置全局 cluster token：请在设置页填写".to_string())
             })?;
-        let dst_dir = PathBuf::from(&dst_dir_str);
+
+        let dst_server_path = setting.dst_server_path.as_deref().ok_or_else(|| {
+            SimpleAppWebError::new(400, "未配置服务端安装目录：请在设置页配置".to_string())
+        })?;
 
         // 3. 扫描 DoNotStarveTogether 目录获取已有的最大 Server 编号，新编号为最大+1
         let server_number = get_next_folder_number_from_fs(&dst_dir, &constant_component.dst_server_prefix)?;
@@ -77,32 +73,20 @@ pub async fn convert_cluster_to_server_handler(request: ConvertClusterRequest) -
         // 4. 复制 Cluster 文件夹到新的 Server 位置
         copy_dir_all(&cluster_path_buf, &server_path)?;
 
-        // 5. 在 Server 目录下创建 cluster_token.txt 文件并写入 token
+        // 5. 全局令牌落盘（只写文件；服务器是否覆盖由文件本身表达）
         let token_file_path = server_path.join(&constant_component.cluster_token_file);
-        fs::write(&token_file_path, &request.token)?;
+        write_token(&token_file_path, token)?;
 
         // 6. 生成 StartServer.bat 文件
         let bat_content = generate_start_server_bat(
+            &constant_component,
             &server_id,
-            &constant_component.dst_steam_id,
-            &archive_path_service,
+            dst_server_path,
+            setting.workshop_path.as_deref(),
             request.has_caves,
-        )
-        .await?;
+        );
         let bat_file_path = server_path.join(&constant_component.start_server_bat_name);
         fs::write(&bat_file_path, bat_content)?;
-
-        // 7. 保存 Server 路径到数据库
-        archive_path_service
-            .save_archive_path(
-                server_id.clone(),
-                "server".to_string(),
-                server_path.to_string_lossy().into_owned(),
-            )
-            .await?;
-
-        // 8. 将客户端模组移动到服务器模组目录
-        move_client_mods_to_server(&archive_path_service).await?;
 
         Ok(server_id)
     })
@@ -117,38 +101,27 @@ pub struct ConvertServerToClusterRequest {
 #[auto_command]
 pub async fn convert_server_to_cluster_handler(request: ConvertServerToClusterRequest) -> JsonResponse {
     json_response_wrap!(function_name = "转为本地存档", {
-        let constant_component: Arc<ConstantComponent> = AppCoreUtil::get_component()?;
-        let archive_path_service: Arc<ArchivePathService> = AppCoreUtil::get_component()?;
+        let constant_component: Arc<ConstantComponent> = app_component()?;
+        let setting_service: Arc<SettingService> = app_component()?;
 
-        // 1. 获取 Server 的完整路径
-        let server_path = archive_path_service
-            .get_path_by_id(&request.server_id)
-            .await?
-            .ok_or_else(|| {
-                SimpleAppWebError::new(
-                    404,
-                    format!("Server path not found: {}", request.server_id),
-                )
-            })?;
-        let server_path_buf = PathBuf::from(&server_path);
+        // 1. 推导 Server 的完整路径
+        let server_path_buf = setting_service
+            .resolve_archive_path(&request.server_id)
+            .await?;
         if !server_path_buf.exists() {
             return Err(SimpleAppWebError::new(
                 404,
-                format!("Server path does not exist: {}", server_path),
+                format!("Server path does not exist: {}", server_path_buf.display()),
             ));
         }
 
-        // 2. 从 key-value 表获取用户存档目录（DoNotStarveTogether/{用户ID}，Cluster 存放位置）
-        let user_dir_str = archive_path_service
-            .get_value(KEY_DST_USER_DIR)
-            .await?
-            .ok_or_else(|| {
-                SimpleAppWebError::new(
-                    500,
-                    "DST user directory not found. Please scan archives first.".to_string(),
-                )
-            })?;
-        let user_dir = PathBuf::from(&user_dir_str);
+        // 2. 获取用户存档目录（DoNotStarveTogether/{用户ID}，Cluster 存放位置）
+        let user_dir = setting_service.user_dir().await?.ok_or_else(|| {
+            SimpleAppWebError::new(
+                500,
+                "DST user directory not found. Please scan archives first.".to_string(),
+            )
+        })?;
 
         // 3. 扫描获取已有的最大 Cluster 编号，新编号为最大+1
         let cluster_number = get_next_folder_number_from_fs(&user_dir, &constant_component.dst_cluster_prefix)?;
@@ -158,15 +131,6 @@ pub async fn convert_server_to_cluster_handler(request: ConvertServerToClusterRe
         // 4. 复制 Server 文件夹到新的 Cluster 位置
         copy_dir_all(&server_path_buf, &cluster_path)?;
 
-        // 5. 保存 Cluster 路径到数据库
-        archive_path_service
-            .save_archive_path(
-                cluster_id.clone(),
-                "cluster".to_string(),
-                cluster_path.to_string_lossy().into_owned(),
-            )
-            .await?;
-
         Ok(cluster_id)
     })
 }
@@ -175,17 +139,12 @@ pub async fn convert_server_to_cluster_handler(request: ConvertServerToClusterRe
 #[auto_command]
 pub async fn delete_server_handler(server_id: String) -> JsonResponse {
     json_response_wrap!(function_name = "删除服务器", {
-        let archive_path_service: Arc<ArchivePathService> = AppCoreUtil::get_component()?;
+        let setting_service: Arc<SettingService> = app_component()?;
 
-        // 1. 获取 Server 的完整路径
-        let server_path = archive_path_service
-            .get_path_by_id(&server_id)
-            .await?
-            .ok_or_else(|| {
-                SimpleAppWebError::new(404, format!("Server path not found: {}", server_id))
-            })?;
-
-        let server_path_buf = PathBuf::from(&server_path);
+        // 1. 推导 Server 的完整路径
+        let server_path_buf = setting_service
+            .resolve_archive_path(&server_id)
+            .await?;
 
         // 2. 删除整个 Server 文件夹
         if server_path_buf.exists() {
@@ -194,8 +153,9 @@ pub async fn delete_server_handler(server_id: String) -> JsonResponse {
             })?;
         }
 
-        // 3. 从数据库中删除路径记录
-        archive_path_service.delete_path(&server_id).await?;
+        // 3. 移除运行记录（若该服务器正被监视）
+        let runtime_service: Arc<ServerRuntimeService> = app_component()?;
+        runtime_service.remove(&server_id).await?;
 
         Ok(())
     })
@@ -205,37 +165,27 @@ pub async fn delete_server_handler(server_id: String) -> JsonResponse {
 #[auto_command]
 pub async fn sync_client_mods_to_server_handler() -> JsonResponse {
     json_response_wrap!(function_name = "同步模组", {
-        let archive_path_service: Arc<ArchivePathService> = AppCoreUtil::get_component()?;
-        move_client_mods_to_server(&archive_path_service).await?;
+        let setting_service: Arc<SettingService> = app_component()?;
+        move_client_mods_to_server(&setting_service).await?;
         Ok(())
     })
 }
 
 /// 将客户端模组移动到服务器模组目录
 async fn move_client_mods_to_server(
-    archive_path_service: &ArchivePathService,
+    setting_service: &SettingService,
 ) -> Result<(), SimpleAppWebError> {
+    let setting = setting_service.get().await?;
+
     // 获取客户端路径
-    let client_path = archive_path_service
-        .get_value(KEY_DST_CLIENT_PATH)
-        .await?
-        .ok_or_else(|| {
-            SimpleAppWebError::new(
-                500,
-                "DST client path not found. Please scan mods first.".to_string(),
-            )
-        })?;
+    let client_path = setting.dst_client_path.ok_or_else(|| {
+        SimpleAppWebError::new(400, "未配置客户端安装目录：请在设置页配置".to_string())
+    })?;
 
     // 获取服务器路径
-    let server_path = archive_path_service
-        .get_value(KEY_DST_SERVER_PATH)
-        .await?
-        .ok_or_else(|| {
-            SimpleAppWebError::new(
-                500,
-                "DST server path not found. Please scan mods first.".to_string(),
-            )
-        })?;
+    let server_path = setting.dst_server_path.ok_or_else(|| {
+        SimpleAppWebError::new(400, "未配置服务端安装目录：请在设置页配置".to_string())
+    })?;
 
     let client_mods_path = PathBuf::from(&client_path).join("mods");
     let server_mods_path = PathBuf::from(&server_path).join("mods");
@@ -294,37 +244,23 @@ fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> Result<(), SimpleAppWebError> {
 }
 
 /// 生成 StartServer.bat 文件内容
-async fn generate_start_server_bat(
+fn generate_start_server_bat(
+    cc: &ConstantComponent,
     server_id: &str,
-    steam_app_id: &str,
-    archive_path_service: &ArchivePathService,
+    dst_server_path: &str,
+    workshop_path: Option<&str>,
     has_caves: bool,
-) -> Result<String, SimpleAppWebError> {
-    let cc = AppCoreUtil::get_component::<ConstantComponent>()?;
-    // 获取 DST 服务器路径和 Steam Workshop 路径
-    let dst_server_path = archive_path_service
-        .get_value(KEY_DST_SERVER_PATH)
-        .await?
-        .ok_or_else(|| {
-            SimpleAppWebError::new(
-                500,
-                "DST server path not found. Please scan mods first.".to_string(),
-            )
-        })?;
-
-    let workshop_path = archive_path_service
-        .get_value(KEY_STEAM_WORKSHOP_PATH)
-        .await?
-        .unwrap_or_default();
-
+) -> String {
     // 构建 bin 目录路径
-    let bin_path = PathBuf::from(&dst_server_path).join("bin");
+    let bin_path = PathBuf::from(dst_server_path).join("bin");
+    let workshop_path = workshop_path.unwrap_or_default();
 
     // 生成批处理文件内容
     let mut bat_content = format!(
         r#"@ECHO OFF
 
 set SteamAppId={}
+
 set SteamGameId={}
 
 set COMMON_UGC_PATH="{}"
@@ -333,8 +269,8 @@ cd /D "{}"
 
 start "{}_{}" dontstarve_dedicated_server_nullrenderer.exe -console -cluster {} -shard {} -ugc_directory %COMMON_UGC_PATH%
 "#,
-        steam_app_id,
-        steam_app_id,
+        cc.dst_steam_id,
+        cc.dst_steam_id,
         workshop_path,
         bin_path.to_string_lossy(),
         server_id,
@@ -355,31 +291,26 @@ start "{}_{}" dontstarve_dedicated_server_nullrenderer.exe -console -cluster {} 
         ));
     }
 
-    Ok(bat_content)
+    bat_content
 }
 
 /// 启动服务器
 #[auto_command]
 pub async fn start_server_handler(server_id: String) -> JsonResponse {
     json_response_wrap!(function_name = "启动服务器", {
-        let archive_path_service: Arc<ArchivePathService> = AppCoreUtil::get_component()?;
-        let cc = AppCoreUtil::get_component::<ConstantComponent>()?;
+        let setting_service: Arc<SettingService> = app_component()?;
+        let cc = app_component::<ConstantComponent>()?;
 
-        // 1. 获取 Server 的完整路径
-        let server_path = archive_path_service
-            .get_path_by_id(&server_id)
-            .await?
-            .ok_or_else(|| {
-                SimpleAppWebError::new(404, format!("Server path not found: {}", server_id))
-            })?;
-
-        let server_path_buf = PathBuf::from(&server_path);
+        // 1. 推导 Server 的完整路径
+        let server_path_buf = setting_service
+            .resolve_archive_path(&server_id)
+            .await?;
 
         // 验证路径存在
         if !server_path_buf.exists() {
             return Err(SimpleAppWebError::new(
                 404,
-                format!("Server path does not exist: {}", server_path),
+                format!("Server path does not exist: {}", server_path_buf.display()),
             ));
         }
 
@@ -388,7 +319,11 @@ pub async fn start_server_handler(server_id: String) -> JsonResponse {
         if !bat_file_path.exists() {
             return Err(SimpleAppWebError::new(
                 404,
-                format!("{} not found in: {}", cc.start_server_bat_name, server_path),
+                format!(
+                    "{} not found in: {}",
+                    cc.start_server_bat_name,
+                    server_path_buf.display()
+                ),
             ));
         }
 
@@ -405,7 +340,16 @@ pub async fn start_server_handler(server_id: String) -> JsonResponse {
             ));
         }
 
-        // 4. 执行 StartServer.bat 文件
+        // 4. 前置校验：读取该服务器目录下的 cluster_token.txt
+        let token_file = server_path_buf.join(&cc.cluster_token_file);
+        if read_token(&token_file).is_none() {
+            return Err(SimpleAppWebError::new(
+                400,
+                "该服务器缺少 cluster_token.txt（或内容为空）：请在服务器配置里填写令牌".to_string(),
+            ));
+        }
+
+        // 5. 执行 StartServer.bat 文件
         // 直接使用 cmd /C 来执行批处理文件，执行完毕后 cmd 窗口自动关闭
         let mut command = std::process::Command::new("cmd");
         command
@@ -420,34 +364,15 @@ pub async fn start_server_handler(server_id: String) -> JsonResponse {
             .spawn()
             .map_err(|e| SimpleAppWebError::new(500, format!("Failed to start server: {}", e)))?;
 
+        // 6. 登记运行状态：崩档监视只接管本应用启动过的服务器
+        //    洞穴分片是否期望存在，按 Caves 目录是否存在判断（与详情页的 has_caves 一致）
+        let runtime_service: Arc<ServerRuntimeService> = app_component()?;
+        let expect_caves = server_path_buf.join(&cc.caves_shard_name).is_dir();
+        runtime_service
+            .upsert(&server_id, STATUS_STARTING, expect_caves)
+            .await?;
+
         Ok(())
-    })
-}
-
-/// 查询服务器状态
-#[auto_command]
-pub async fn query_server_status_handler(server_id: String) -> JsonResponse {
-    json_response_wrap!(function_name = "查询服务器状态", {
-        let cc = AppCoreUtil::get_component::<ConstantComponent>()?;
-        let master_title = format!("{}_{}", server_id, cc.master_shard_name);
-        let caves_title = format!("{}_{}", server_id, cc.caves_shard_name);
-
-        let master_running = find_window_by_title(&master_title);
-        let caves_running = find_window_by_title(&caves_title);
-
-        // 如果 Master 或 Caves 任一在运行，则认为服务器在运行
-        let status = if master_running || caves_running {
-            "running"
-        } else {
-            "stopped"
-        };
-
-        Ok(serde_json::json!({
-            "server_id": server_id,
-            "status": status,
-            "master_running": master_running,
-            "caves_running": caves_running
-        }))
     })
 }
 
@@ -455,9 +380,13 @@ pub async fn query_server_status_handler(server_id: String) -> JsonResponse {
 #[auto_command]
 pub async fn stop_server_handler(server_id: String) -> JsonResponse {
     json_response_wrap!(function_name = "停止服务器", {
-        let cc = AppCoreUtil::get_component::<ConstantComponent>()?;
+        let cc = app_component::<ConstantComponent>()?;
         let master_title = format!("{}_{}", server_id, cc.master_shard_name);
         let caves_title = format!("{}_{}", server_id, cc.caves_shard_name);
+
+        // 标记为关闭中：崩档监视据此不做"崩档"判定，只等窗口消失后移除记录
+        let runtime_service: Arc<ServerRuntimeService> = app_component()?;
+        runtime_service.set_status(&server_id, STATUS_STOPPING).await?;
 
         // 查找并停止洞穴服务器（洞穴服务器可能不存在，不检查结果）
         let _ = find_and_send_shutdown_command(&caves_title);
@@ -479,118 +408,6 @@ pub async fn stop_server_handler(server_id: String) -> JsonResponse {
     })
 }
 
-/// 查找窗口并发送关闭命令
-fn find_and_send_shutdown_command(window_title: &str) -> Result<bool, SimpleAppWebError> {
-    unsafe {
-        let wide_title = HSTRING::from(window_title);
-        let hwnd: HWND = FindWindowW(None, PCWSTR::from_raw(wide_title.as_ptr()))?;
-
-        if !hwnd.is_invalid() {
-            // 如果窗口已最小化，先恢复窗口
-            if IsIconic(hwnd).as_bool() {
-                let _ = ShowWindow(hwnd, SW_RESTORE);
-                thread::sleep(Duration::from_millis(300));
-            }
-
-            // 激活窗口（必须激活才能接收输入）
-            let _ = SetForegroundWindow(hwnd);
-
-            // 等待窗口激活
-            thread::sleep(Duration::from_millis(200));
-
-            // 使用 SendInput 发送 Unicode 字符（模拟真实键盘输入）
-            send_unicode_string(
-                &AppCoreUtil::get_component::<ConstantComponent>()?.dst_end_command,
-            );
-
-            // 发送回车键
-            send_key_press(VK_RETURN);
-
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
-/// 使用 SendInput 发送 Unicode 字符串
-fn send_unicode_string(text: &str) {
-    unsafe {
-        for ch in text.chars() {
-            let input = INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VIRTUAL_KEY(0),
-                        wScan: ch as u16,
-                        dwFlags: KEYEVENTF_UNICODE,
-                        time: 0,
-                        dwExtraInfo: 0,
-                    },
-                },
-            };
-
-            let _ = SendInput(&[input], size_of::<INPUT>() as i32);
-
-            // 发送按键释放
-            let input_up = INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VIRTUAL_KEY(0),
-                        wScan: ch as u16,
-                        dwFlags: KEYBD_EVENT_FLAGS(KEYEVENTF_UNICODE.0 | KEYEVENTF_KEYUP.0),
-                        time: 0,
-                        dwExtraInfo: 0,
-                    },
-                },
-            };
-
-            let _ = SendInput(&[input_up], size_of::<INPUT>() as i32);
-
-            // 小延迟确保按键顺序
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
-}
-
-/// 发送虚拟键码按键（用于回车等功能键）
-fn send_key_press(vk: VIRTUAL_KEY) {
-    unsafe {
-        // 按下
-        let input_down = INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: vk,
-                    wScan: 0,
-                    dwFlags: KEYBD_EVENT_FLAGS(0),
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-
-        let _ = SendInput(&[input_down], size_of::<INPUT>() as i32);
-
-        // 释放
-        let input_up = INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: vk,
-                    wScan: 0,
-                    dwFlags: KEYEVENTF_KEYUP,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-
-        let _ = SendInput(&[input_up], size_of::<INPUT>() as i32);
-    }
-}
-
 /// 语言设置请求
 #[derive(Deserialize)]
 pub struct SetLanguageRequest {
@@ -601,10 +418,8 @@ pub struct SetLanguageRequest {
 #[auto_command]
 pub async fn set_app_language_handler(request: SetLanguageRequest) -> JsonResponse {
     json_response_wrap!(function_name = "设置语言", {
-        let archive_path_service: Arc<ArchivePathService> = AppCoreUtil::get_component()?;
-        archive_path_service
-            .set_value(KEY_APP_LANGUAGE, &request.language)
-            .await?;
+        let setting_service: Arc<SettingService> = app_component()?;
+        setting_service.set_language(&request.language).await?;
         Ok(())
     })
 }
@@ -613,12 +428,8 @@ pub async fn set_app_language_handler(request: SetLanguageRequest) -> JsonRespon
 #[auto_command]
 pub async fn get_app_language_handler() -> JsonResponse {
     json_response_wrap!(function_name = "获取语言", {
-        let archive_path_service: Arc<ArchivePathService> = AppCoreUtil::get_component()?;
-        // 默认返回 "zh"
-        let language = archive_path_service
-            .get_value(KEY_APP_LANGUAGE)
-            .await?
-            .unwrap_or_else(|| "zh".to_string());
+        let setting_service: Arc<SettingService> = app_component()?;
+        let language = setting_service.language().await?;
         Ok(language)
     })
 }
@@ -627,13 +438,8 @@ pub async fn get_app_language_handler() -> JsonResponse {
 #[auto_command]
 pub async fn open_archive_in_folder_handler(id: String) -> JsonResponse {
     json_response_wrap!(function_name = "在文件夹中打开", {
-        let archive_path_service: Arc<ArchivePathService> = AppCoreUtil::get_component()?;
-        let path = archive_path_service
-            .get_path_by_id(&id)
-            .await?
-            .ok_or_else(|| {
-                SimpleAppWebError::new(404, format!("Path not found: {}", id))
-            })?;
+        let setting_service: Arc<SettingService> = app_component()?;
+        let path = setting_service.resolve_archive_path(&id).await?;
         // 在 Windows 资源管理器中打开文件夹
         std::process::Command::new("explorer")
             .arg(&path)

@@ -1,28 +1,26 @@
 import {defineStore} from 'pinia';
-import {ref, reactive} from "vue";
+import {ref} from "vue";
+import {listen} from '@tauri-apps/api/event';
 import {tauriInvokeUtil} from "@/utils/tauriInvokeUtil.js";
 import {ElMessage, ElMessageBox} from "element-plus";
 import {TRANSLATIONS} from "@/constants.js";
 import {useSettingsStore} from "./settingsStore.js";
 
 export const useAppStore = defineStore('app', () => {
-    // --- 基础配置 ---
-    const appInfo = reactive({
-        serverToken: '',
-        localSavePath: '',
-        serverInstallPath: ''
-    });
-
-    // --- 业务数据 ---
-    // mods 结构: [{ folder_name: 'workshop-123456', mod_name: 'Mod Name' }]
-    const mods = ref([]);
-
+    // --- 列表数据（只含摘要，详情按需加载）---
     const clusters = ref([]);
     const servers = ref([]);
 
-    // --- 选中状态 ---
+    // 本地可用的模组 id（workshop-N），用于判断服务器所需模组是否缺失
+    const localModIds = ref([]);
+    // 模组 id -> 名称（按需解析，后端有 mtime 缓存）
+    const modNames = ref({});
+
+    // --- 选中状态与详情 ---
     const selectedClusterId = ref(null);
     const selectedServerId = ref(null);
+    const serverDetail = ref(null); // ServerDetailVO
+    const serverSaves = ref([]);    // ArchivePhaseVO[]
     const isConverting = ref(false);
 
     // --- 获取翻译文本 ---
@@ -32,12 +30,109 @@ export const useAppStore = defineStore('app', () => {
         return TRANSLATIONS[key]?.[lang] || TRANSLATIONS[key]?.['zh'] || key;
     };
 
+    // --- 列表加载 ---
+    // 全部按配置页里的路径查询（自动发现只在配置页的「自动扫描」按钮里发生）
+
+    const loadMods = async () => {
+        const res = await tauriInvokeUtil('list_mods_handler', {}, {showLoading: false});
+        if (res.code !== 200 || !res.data) return;
+        if (res.data.found) {
+            localModIds.value = res.data.mod_ids || [];
+        } else {
+            ElMessage.warning(getTranslation('dst_mod_scan_warn_message'));
+            localModIds.value = [];
+        }
+    };
+
+    // 按需解析模组名称（后端按目录 mtime 缓存，重复调用很便宜）
+    const loadModNames = async (modIds) => {
+        if (!modIds || modIds.length === 0) return;
+        const res = await tauriInvokeUtil('resolve_mod_names_handler', {
+            request: {mod_ids: modIds}
+        }, {showLoading: false});
+        if (res.code !== 200 || !res.data) return;
+
+        const next = {...modNames.value};
+        for (const item of res.data) {
+            next[item.mod_id] = item.name || item.mod_id;
+        }
+        modNames.value = next;
+    };
+
+    const loadClusters = async () => {
+        const res = await tauriInvokeUtil('list_clusters_handler', {}, {showLoading: false});
+        if (res.code !== 200 || !res.data) return;
+        clusters.value = res.data.items || [];
+        if (!res.data.found) {
+            ElMessage.warning(getTranslation('dst_archive_scan_warn_message'));
+        }
+    };
+
+    // 与 clusters 共用同一根目录，扫描失败的提示由 loadClusters 负责
+    const loadServers = async () => {
+        const res = await tauriInvokeUtil('list_servers_handler', {}, {showLoading: false});
+        if (res.code !== 200 || !res.data) return;
+        servers.value = res.data.items || [];
+    };
+
+    // --- 详情加载 ---
+
+    const loadServerDetail = async (id) => {
+        const res = await tauriInvokeUtil('get_server_handler', {id}, {showLoading: false});
+        // 请求期间用户可能已切换选择，丢弃过期结果
+        if (selectedServerId.value !== id) return;
+        serverDetail.value = res.code === 200 && res.data ? res.data : null;
+    };
+
+    const loadServerSaves = async (id) => {
+        const saves = await fetchServerSaves(id);
+        // 请求期间用户可能已切换选择，丢弃过期结果
+        if (selectedServerId.value !== id) return;
+        serverSaves.value = saves;
+    };
+
+    const fetchServerSaves = async (id) => {
+        const res = await tauriInvokeUtil('get_server_saves_handler', {id}, {showLoading: false});
+        return res.code === 200 && res.data ? res.data : [];
+    };
+
     // --- Actions ---
+
+    // 服务器状态变化事件（后端崩档监视推送；事件名为跨端契约，与后端 watch::STATUS_EVENT 一致）
+    const STATUS_EVENT = 'server-status-changed';
+
+    const initStatusEvents = async () => {
+        return listen(STATUS_EVENT, (event) => {
+            const {server_id: id, status, reason} = event.payload || {};
+            if (!id || !status) return;
+
+            applyStatus(id, status);
+
+            // 崩档互保触发的关闭：用常驻弹窗告知（必须手动确认，避免错过）
+            if (reason === 'peer-crashed') {
+                notifyPersistent(`${getTranslation('peerCrashedMessage')}（${id}）`);
+            } else if (reason === 'startup-failed') {
+                notifyPersistent(`${getTranslation('startupFailedMessage')}（${id}）`);
+            }
+        });
+    };
+
+    // 常驻提示：贴在页面最上方居中，需用户点击「知道了」才消失
+    const notifyPersistent = (message) => {
+        ElMessageBox.alert(message, getTranslation('warning'), {
+            confirmButtonText: getTranslation('gotIt'),
+            type: 'warning',
+            customClass: 'persistent-alert',
+        }).catch(() => {
+            // 用户用右上角关闭 / ESC 关掉，忽略
+        });
+    };
 
     // 转换存档为服务器
     const convertCluster = async () => {
         if (!selectedClusterId.value) return;
-        if (!appInfo.serverToken) {
+        // token 由后端取配置页的全局令牌；这里只做前置提示，避免白跑一次
+        if (!useSettingsStore().settings.global_cluster_token) {
             ElMessage.warning(getTranslation('tokenRequired'));
             return;
         }
@@ -47,11 +142,9 @@ export const useAppStore = defineStore('app', () => {
 
         isConverting.value = true;
         try {
-            // 调用后端接口
             const res = await tauriInvokeUtil('convert_cluster_to_server_handler', {
                 request: {
                     cluster_id: selectedClusterId.value,
-                    token: appInfo.serverToken,
                     has_caves: cluster.has_caves || false
                 }
             });
@@ -59,29 +152,17 @@ export const useAppStore = defineStore('app', () => {
             if (res.code === 200) {
                 const serverId = res.data;
 
-                // 创建新的服务器对象
-                const newServer = {
-                    ...cluster,
-                    id: serverId, // 使用后端返回的新 ID
-                    status: 'stopped',
-                    config: {
-                        name: cluster.cluster_name || cluster.id,
-                        maxPlayers: cluster.max_players,
-                        password: cluster.cluster_password,
-                        description: cluster.cluster_description,
-                        gameMode: cluster.game_mode,
-                    },
-                    // 将 mods 转换为服务器需要的格式
-                    mods: mods.value.map(m => ({
-                        id: m.folder_name,
-                        name: m.mod_name,
-                        enabled: true
-                    }))
-                };
+                // 转换只负责复制存档；模组同步是独立的写动作，这里显式再调一次
+                await tauriInvokeUtil('sync_client_mods_to_server_handler', {});
+                await loadMods();
 
-                servers.value.push(newServer);
-                selectedServerId.value = newServer.id;
+                // 用后端列表替换本地拼接，随后按需拉取新服务器的详情
                 selectedClusterId.value = null;
+                await loadServers();
+                selectedServerId.value = serverId;
+                serverDetail.value = null;
+                serverSaves.value = [];
+                await Promise.all([loadServerDetail(serverId), loadServerSaves(serverId)]);
 
                 ElMessage.success(getTranslation('convertSuccess'));
             }
@@ -108,18 +189,11 @@ export const useAppStore = defineStore('app', () => {
             if (res.code === 200) {
                 const clusterId = res.data;
 
-                // 从服务器列表中找到对应服务器
-                const server = servers.value.find(s => s.id === selectedServerId.value);
-
-                // 创建新的 cluster 对象
-                const newCluster = {
-                    ...server,
-                    id: clusterId,
-                };
-
-                clusters.value.push(newCluster);
-                selectedClusterId.value = newCluster.id;
                 selectedServerId.value = null;
+                serverDetail.value = null;
+                serverSaves.value = [];
+                await loadClusters();
+                selectedClusterId.value = clusterId;
 
                 ElMessage.success(getTranslation('convertToLocalSuccess'));
             }
@@ -131,28 +205,36 @@ export const useAppStore = defineStore('app', () => {
         }
     };
 
-    // 更新服务器信息
-    const updateServer = (updatedServer) => {
-        const index = servers.value.findIndex(s => s.id === updatedServer.id);
+    // 更新服务器信息（详情对象与列表项是两个对象，需一并同步）
+    const updateServer = (updated) => {
+        if (serverDetail.value?.id === updated.id) {
+            serverDetail.value = {...serverDetail.value, ...updated};
+        }
+
+        const index = servers.value.findIndex(s => s.id === updated.id);
         if (index !== -1) {
-            servers.value[index] = updatedServer;
+            servers.value[index] = {
+                ...servers.value[index],
+                status: updated.status ?? servers.value[index].status,
+                cluster_name: updated.cluster_name ?? servers.value[index].cluster_name,
+            };
         }
     };
 
     // 删除服务器
     const deleteServer = async (id) => {
         try {
-            // 调用后端接口
             const res = await tauriInvokeUtil('delete_server_handler', {
                 serverId: id
             });
 
             if (res.code === 200) {
-                // 从前端列表中移除
-                servers.value = servers.value.filter(s => s.id !== id);
                 if (selectedServerId.value === id) {
                     selectedServerId.value = null;
+                    serverDetail.value = null;
+                    serverSaves.value = [];
                 }
+                await loadServers();
                 ElMessage.success(getTranslation('deleteSuccess'));
             }
         } catch (error) {
@@ -161,12 +243,32 @@ export const useAppStore = defineStore('app', () => {
         }
     };
 
-    const changeSelectedServer = (id) => {
-        selectedServerId.value = selectedServerId.value === id ? null : id;
+    // 选中服务器：只在此处按需加载详情与存档列表
+    const changeSelectedServer = async (id) => {
+        const next = selectedServerId.value === id ? null : id;
+        selectedServerId.value = next;
+        serverDetail.value = null;
+        serverSaves.value = [];
+
+        if (next) {
+            await Promise.all([loadServerDetail(next), loadServerSaves(next)]);
+        }
     };
 
     const changeSelectedCluster = (id) => {
         selectedClusterId.value = selectedClusterId.value === id ? null : id;
+    };
+
+    // 同步状态到详情与列表
+    const applyStatus = (id, status) => {
+        if (serverDetail.value?.id === id) {
+            serverDetail.value = {...serverDetail.value, status};
+        }
+
+        const index = servers.value.findIndex(s => s.id === id);
+        if (index !== -1) {
+            servers.value[index] = {...servers.value[index], status};
+        }
     };
 
     // 停止服务器
@@ -177,11 +279,8 @@ export const useAppStore = defineStore('app', () => {
             });
 
             if (res.code === 200) {
-                // 设置为过渡态 stopping，由轮询确认实际关闭后再改为 stopped
-                const index = servers.value.findIndex(s => s.id === id);
-                if (index !== -1) {
-                    servers.value[index].status = 'stopping';
-                }
+                // 过渡态 stopping：实际关闭后由后端监视任务推送 stopped
+                applyStatus(id, 'stopping');
                 ElMessage.success(getTranslation('stopSuccess'));
             }
         } catch (error) {
@@ -190,29 +289,15 @@ export const useAppStore = defineStore('app', () => {
         }
     };
 
-    // 检查服务器的模组是否都存在
+    // 检查当前服务器的模组是否都存在
     const checkServerModsExist = (serverId) => {
-        const server = servers.value.find(s => s.id === serverId);
-        if (!server) return {allExist: true, missingMods: []};
-
-        const serverModIds = server.mod_ids || [];
+        const serverModIds = serverDetail.value?.id === serverId ? (serverDetail.value.mod_ids || []) : [];
         if (serverModIds.length === 0) {
             return {allExist: true, missingMods: []};
         }
 
-        const missingMods = [];
-        for (const modId of serverModIds) {
-            const foundMod = mods.value.find(m => {
-                // 如果是纯数字文件夹，补全为 workshop-数字 格式进行比较
-                const normalizedFolderName = /^\d+$/.test(m.folder_name)
-                    ? `workshop-${m.folder_name}`
-                    : m.folder_name;
-                return normalizedFolderName === modId;
-            });
-            if (!foundMod) {
-                missingMods.push(modId);
-            }
-        }
+        const available = localModIds.value || [];
+        const missingMods = serverModIds.filter(modId => !available.includes(modId));
 
         return {
             allExist: missingMods.length === 0,
@@ -220,29 +305,53 @@ export const useAppStore = defineStore('app', () => {
         };
     };
 
+    // 只警告不拦截的确认框：用户选择继续返回 true
+    const confirmContinue = async (message, title) => {
+        try {
+            await ElMessageBox.confirm(message, title, {
+                confirmButtonText: getTranslation('continueStart'),
+                cancelButtonText: getTranslation('cancel'),
+                type: 'warning',
+            });
+            return true;
+        } catch (error) {
+            // 用户取消
+            return false;
+        }
+    };
+
+    // 填模板里的 {count} 占位
+    const withCount = (key, count) => getTranslation(key).replace('{count}', String(count));
+
     // 启动服务器
     const startServer = async (id) => {
-        // 先检查模组是否都存在
-        const {allExist} = checkServerModsExist(id);
+        // 启动前的两类风险只提示、不拦截，由用户决定是否继续
+
+        // 1. 缺失模组
+        const {allExist, missingMods} = checkServerModsExist(id);
         if (!allExist) {
-            // 显示消息框提示用户
-            await ElMessageBox.alert(
-                getTranslation('missingModsMessage'),
-                getTranslation('missingModsTitle'),
-                {
-                    confirmButtonText: getTranslation('confirm'),
-                    type: 'warning'
-                }
+            const goOn = await confirmContinue(
+                withCount('missingModsMessage', missingMods.length),
+                getTranslation('missingModsTitle')
             );
-            return;
+            if (!goOn) return;
+        }
+
+        // 2. 存档不一致（只存在于单侧的存档无法加载）
+        const saves =
+            selectedServerId.value === id ? (serverSaves.value || []) : await fetchServerSaves(id);
+        const mismatchedCount = saves.filter(save => save.mismatched).length;
+        if (mismatchedCount > 0) {
+            const goOn = await confirmContinue(
+                withCount('mismatchedSavesOnStartMessage', mismatchedCount),
+                getTranslation('warning')
+            );
+            if (!goOn) return;
         }
 
         try {
             // 更新服务器状态为 starting
-            const index = servers.value.findIndex(s => s.id === id);
-            if (index !== -1) {
-                servers.value[index].status = 'starting';
-            }
+            applyStatus(id, 'starting');
 
             // 调用后端启动服务器
             const res = await tauriInvokeUtil('start_server_handler', {
@@ -251,48 +360,49 @@ export const useAppStore = defineStore('app', () => {
 
             if (res.code === 200) {
                 // 启动成功后，更新状态为 running
-                if (index !== -1) {
-                    servers.value[index].status = 'running';
-                }
+                applyStatus(id, 'running');
                 ElMessage.success(getTranslation('startSuccess'));
+            } else {
+                // 业务错误（例如未配置 cluster token）：回滚状态，避免卡在 starting
+                applyStatus(id, 'stopped');
             }
         } catch (error) {
             console.error("Start server failed", error);
             // 启动失败，恢复状态为 stopped
-            const index = servers.value.findIndex(s => s.id === id);
-            if (index !== -1) {
-                servers.value[index].status = 'stopped';
-            }
+            applyStatus(id, 'stopped');
             ElMessage.error(getTranslation('startFailed') + ': ' + error.message);
         }
     };
 
-    // 同步模组
-    const syncMods = async () => {
-        try {
-            const res = await tauriInvokeUtil('sync_client_mods_to_server_handler', {});
-            if (res.code === 200) {
-                ElMessage.success(getTranslation('syncModsSuccess'));
-                return true;
-            } else {
-                ElMessage.error(res.message || getTranslation('syncModsFailed'));
-                return false;
+    // 清理 Master/Caves 不一致的存档（会删除文件，调用前需二次确认）
+    const repairSaves = async (id) => {
+        const res = await tauriInvokeUtil('repair_server_saves_handler', {id});
+        if (res.code === 200) {
+            // 只刷新当前选中服务器的详情/存档，列表项不受影响
+            if (selectedServerId.value === id) {
+                await Promise.all([loadServerDetail(id), loadServerSaves(id)]);
             }
-        } catch (error) {
-            console.error("Sync mods failed", error);
-            ElMessage.error(getTranslation('syncModsFailed') + ': ' + error.message);
-            return false;
+            ElMessage.success(getTranslation('repairSavesSuccess'));
         }
     };
 
     return {
-        appInfo,
-        mods,
         clusters,
         servers,
+        localModIds,
+        modNames,
         selectedClusterId,
         selectedServerId,
+        serverDetail,
+        serverSaves,
         isConverting,
+        loadMods,
+        loadModNames,
+        loadClusters,
+        loadServers,
+        loadServerDetail,
+        loadServerSaves,
+        initStatusEvents,
         updateServer,
         convertCluster,
         convertServerToCluster,
@@ -301,12 +411,6 @@ export const useAppStore = defineStore('app', () => {
         deleteServer,
         stopServer,
         startServer,
-        syncMods
+        repairSaves,
     };
-}, {
-    persist: {
-        key: 'app-storage',
-        storage: localStorage,
-        pick: ['appInfo'] // 持久化配置和服务器列表
-    }
 });

@@ -1,8 +1,8 @@
 use sea_orm::{Database, DatabaseConnection, DbErr};
 use serde::Deserialize;
-use simple_starter_macro::{configuration, provider};
 use std::path::Path;
 use std::sync::Arc;
+use simple_starter_core::{configuration, provider};
 
 #[derive(Deserialize)]
 #[configuration("database")]

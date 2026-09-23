@@ -102,3 +102,13 @@ body {
 .dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
     @apply bg-gray-500;
 }
+
+/*
+   9. 常驻提示弹窗（崩档互保）：贴页面顶部居中，需手动确认才消失。
+   ElMessageBox 的遮罩层是 flex 居中的，给弹窗本身加 margin-bottom: auto
+   即可把它顶到上方（auto 外边距优先于 align-items）。
+*/
+.persistent-alert {
+    margin-top: 6vh;
+    margin-bottom: auto;
+}
